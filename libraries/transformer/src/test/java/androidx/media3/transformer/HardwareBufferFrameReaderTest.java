@@ -15,7 +15,7 @@
  */
 package androidx.media3.transformer;
 
-import static androidx.media3.test.utils.AssetInfo.MP4_ASSET;
+import static androidx.media3.test.utils.AssetInfo.MP4_ADVANCED_ASSET;
 import static androidx.media3.transformer.EditedMediaItemSequence.withAudioFrom;
 import static com.google.common.truth.Truth.assertThat;
 import static org.robolectric.Shadows.shadowOf;
@@ -30,10 +30,12 @@ import androidx.media3.common.util.SystemClock;
 import androidx.media3.common.util.TimestampIterator;
 import androidx.media3.common.util.Util;
 import androidx.media3.effect.HardwareBufferFrame;
+import androidx.media3.transformer.HardwareBufferFrameReader.RendererWakeupListener;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import com.google.common.collect.ImmutableList;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.After;
 import org.junit.Before;
@@ -52,7 +54,7 @@ public class HardwareBufferFrameReaderTest {
   @Before
   public void setUp() {
     EditedMediaItem editedMediaItem =
-        new EditedMediaItem.Builder(MediaItem.fromUri(MP4_ASSET.uri)).build();
+        new EditedMediaItem.Builder(MediaItem.fromUri(MP4_ADVANCED_ASSET.uri)).build();
     EditedMediaItemSequence sequence = withAudioFrom(ImmutableList.of(editedMediaItem));
     Composition composition = new Composition.Builder(sequence).build();
     handlerThread = new HandlerThread("HardwareBufferFrameReaderTest");
@@ -69,6 +71,7 @@ public class HardwareBufferFrameReaderTest {
             },
             handlerThread.getLooper(),
             /* defaultSurfacePixelFormat= */ ImageFormat.YUV_420_888,
+            new DefaultImageReaderAdapter.Factory(),
             /* listener= */ e -> hardwareBufferFrameReaderException.set(e),
             SystemClock.DEFAULT.createHandler(Util.getCurrentOrMainLooper(), /* callback= */ null));
   }
@@ -87,7 +90,10 @@ public class HardwareBufferFrameReaderTest {
   @Test
   public void canAcceptFrameViaSurface_afterSurfaceFrame_returnsFalse() {
     hardwareBufferFrameReader.queueFrameViaSurface(
-        /* presentationTimeUs= */ 0, /* indexOfItem= */ 0, new Format.Builder().build());
+        /* presentationTimeUs= */ 0,
+        /* sequenceOffsetUs= */ 0,
+        /* indexOfItem= */ 0,
+        new Format.Builder().build());
 
     assertThat(hardwareBufferFrameReader.canAcceptFrameViaSurface()).isFalse();
     assertThat(hardwareBufferFrameReaderException.get()).isNull();
@@ -98,6 +104,7 @@ public class HardwareBufferFrameReaderTest {
     hardwareBufferFrameReader.outputBitmap(
         Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888),
         new ConstantRateTimestampIterator(/* durationUs= */ 1_000_000, /* frameRate= */ 30f),
+        /* sequenceOffsetUs= */ 0,
         /* indexOfItem= */ 0);
 
     assertThat(hardwareBufferFrameReader.canAcceptFrameViaSurface()).isFalse();
@@ -113,6 +120,7 @@ public class HardwareBufferFrameReaderTest {
     hardwareBufferFrameReader.outputBitmap(
         Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888),
         /* timestampIterator= */ singleFrame,
+        /* sequenceOffsetUs= */ 0,
         /* indexOfItem= */ 0);
 
     assertThat(singleFrame.hasNext()).isFalse();
@@ -128,6 +136,7 @@ public class HardwareBufferFrameReaderTest {
     hardwareBufferFrameReader.outputBitmap(
         Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888),
         /* timestampIterator= */ thirtyFrames,
+        /* sequenceOffsetUs= */ 0,
         /* indexOfItem= */ 0);
 
     // Trying to output 30 frames. Stop outputting when the output capacity is reached.
@@ -135,7 +144,9 @@ public class HardwareBufferFrameReaderTest {
     assertThat(hardwareBufferFrameReader.canAcceptFrameViaSurface()).isFalse();
     assertThat(receivedFrames).hasSize(2);
     assertThat(receivedFrames.get(0).presentationTimeUs).isEqualTo(0);
+    assertThat(receivedFrames.get(0).sequencePresentationTimeUs).isEqualTo(0);
     assertThat(receivedFrames.get(1).presentationTimeUs).isEqualTo(33_333);
+    assertThat(receivedFrames.get(1).sequencePresentationTimeUs).isEqualTo(33_333);
     assertThat(hardwareBufferFrameReaderException.get()).isNull();
   }
 
@@ -147,6 +158,7 @@ public class HardwareBufferFrameReaderTest {
     hardwareBufferFrameReader.outputBitmap(
         Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888),
         /* timestampIterator= */ thirtyFrames,
+        /* sequenceOffsetUs= */ 0,
         /* indexOfItem= */ 0);
 
     // Trying to output 30 frames. Stop outputting when the output capacity is reached.
@@ -158,9 +170,57 @@ public class HardwareBufferFrameReaderTest {
     // Once a frame is released, more output can be generated.
     assertThat(receivedFrames).hasSize(3);
     assertThat(receivedFrames.get(0).presentationTimeUs).isEqualTo(0);
+    assertThat(receivedFrames.get(0).sequencePresentationTimeUs).isEqualTo(0);
     assertThat(receivedFrames.get(1).presentationTimeUs).isEqualTo(33_333);
+    assertThat(receivedFrames.get(1).sequencePresentationTimeUs).isEqualTo(33_333);
     assertThat(receivedFrames.get(2).presentationTimeUs).isEqualTo(66_667);
+    assertThat(receivedFrames.get(2).sequencePresentationTimeUs).isEqualTo(66_667);
     assertThat(hardwareBufferFrameReaderException.get()).isNull();
+  }
+
+  @Test
+  public void addWakeupListenerProvider_releaseFrame_callsRendererWakeupListener() {
+    TimestampIterator twoFrames =
+        new ConstantRateTimestampIterator(/* durationUs= */ 1_000_000, /* frameRate= */ 2f);
+    hardwareBufferFrameReader.outputBitmap(
+        Bitmap.createBitmap(/* width= */ 1, /* height= */ 1, Bitmap.Config.ARGB_8888),
+        /* timestampIterator= */ twoFrames,
+        /* sequenceOffsetUs= */ 0,
+        /* indexOfItem= */ 0);
+
+    AtomicBoolean onWakeupCalled = new AtomicBoolean();
+    hardwareBufferFrameReader.addRendererWakeupListener(() -> onWakeupCalled.set(true));
+    assertThat(hardwareBufferFrameReader.canAcceptFrameViaSurface()).isFalse();
+
+    receivedFrames.get(0).release(/* releaseFence= */ null);
+    shadowOf(handlerThread.getLooper()).idle();
+
+    assertThat(onWakeupCalled.get()).isTrue();
+    assertThat(hardwareBufferFrameReader.canAcceptFrameViaSurface()).isTrue();
+  }
+
+  @Test
+  public void releaseFrame_afterRemoveWakeupListenerProvider_doesNotRendererWakeupListener() {
+    AtomicBoolean onWakeupCalled = new AtomicBoolean();
+    RendererWakeupListener rendererWakeupListener = () -> onWakeupCalled.set(true);
+    TimestampIterator twoFrames =
+        new ConstantRateTimestampIterator(/* durationUs= */ 1_000_000, /* frameRate= */ 2f);
+
+    hardwareBufferFrameReader.outputBitmap(
+        Bitmap.createBitmap(/* width= */ 1, /* height= */ 1, Bitmap.Config.ARGB_8888),
+        /* timestampIterator= */ twoFrames,
+        /* sequenceOffsetUs= */ 0,
+        /* indexOfItem= */ 0);
+
+    hardwareBufferFrameReader.addRendererWakeupListener(rendererWakeupListener);
+    assertThat(hardwareBufferFrameReader.canAcceptFrameViaSurface()).isFalse();
+
+    hardwareBufferFrameReader.removeRendererWakeupListener(rendererWakeupListener);
+    receivedFrames.get(0).release(/* releaseFence= */ null);
+    shadowOf(handlerThread.getLooper()).idle();
+
+    assertThat(onWakeupCalled.get()).isFalse();
+    assertThat(hardwareBufferFrameReader.canAcceptFrameViaSurface()).isTrue();
   }
 
   @Test
@@ -178,7 +238,8 @@ public class HardwareBufferFrameReaderTest {
         new ConstantRateTimestampIterator(/* durationUs= */ 1_000, /* frameRate= */ 1f);
     Bitmap bitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888);
 
-    hardwareBufferFrameReader.outputBitmap(bitmap, singleFrameIterator, /* indexOfItem= */ 0);
+    hardwareBufferFrameReader.outputBitmap(
+        bitmap, singleFrameIterator, /* sequenceOffsetUs= */ 0, /* indexOfItem= */ 0);
     hardwareBufferFrameReader.queueEndOfStream();
     shadowOf(handlerThread.getLooper()).idle();
 
@@ -186,7 +247,36 @@ public class HardwareBufferFrameReaderTest {
     assertThat(receivedFrames).hasSize(2);
     assertThat(receivedFrames.get(0).internalFrame).isInstanceOf(Bitmap.class);
     assertThat(receivedFrames.get(0).presentationTimeUs).isEqualTo(0);
+    assertThat(receivedFrames.get(0).sequencePresentationTimeUs).isEqualTo(0);
     assertThat(receivedFrames.get(1)).isEqualTo(HardwareBufferFrame.END_OF_STREAM_FRAME);
+  }
+
+  @Test
+  public void outputBitmap_withSequenceOffset_outputsFramesWithIncreasingSequenceTime() {
+    TimestampIterator thirtyFrames =
+        new ConstantRateTimestampIterator(/* durationUs= */ 1_000_000, /* frameRate= */ 30f);
+    long sequenceOffsetUs = 100_000;
+
+    hardwareBufferFrameReader.outputBitmap(
+        Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888),
+        /* timestampIterator= */ thirtyFrames,
+        sequenceOffsetUs,
+        /* indexOfItem= */ 1);
+
+    assertThat(receivedFrames).hasSize(2);
+    assertThat(receivedFrames.get(0).presentationTimeUs).isEqualTo(0);
+    assertThat(receivedFrames.get(0).sequencePresentationTimeUs).isEqualTo(100_000);
+
+    assertThat(receivedFrames.get(1).presentationTimeUs).isEqualTo(33_333);
+    assertThat(receivedFrames.get(1).sequencePresentationTimeUs).isEqualTo(133_333);
+
+    receivedFrames.get(0).release(/* releaseFence= */ null);
+    shadowOf(handlerThread.getLooper()).idle();
+
+    // Check that as presentation time increments, sequence time also correctly increments.
+    assertThat(receivedFrames).hasSize(3);
+    assertThat(receivedFrames.get(2).presentationTimeUs).isEqualTo(66_667);
+    assertThat(receivedFrames.get(2).sequencePresentationTimeUs).isEqualTo(166_667);
   }
 
   @Test
@@ -197,7 +287,8 @@ public class HardwareBufferFrameReaderTest {
     Bitmap bitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888);
 
     hardwareBufferFrameReader.queueEndOfStream();
-    hardwareBufferFrameReader.outputBitmap(bitmap, singleFrameIterator, /* indexOfItem= */ 0);
+    hardwareBufferFrameReader.outputBitmap(
+        bitmap, singleFrameIterator, /* sequenceOffsetUs= */ 0, /* indexOfItem= */ 0);
     shadowOf(handlerThread.getLooper()).idle();
 
     assertThat(hardwareBufferFrameReaderException.get()).isNull();
@@ -205,6 +296,7 @@ public class HardwareBufferFrameReaderTest {
     assertThat(receivedFrames.get(0)).isEqualTo(HardwareBufferFrame.END_OF_STREAM_FRAME);
     assertThat(receivedFrames.get(1).internalFrame).isInstanceOf(Bitmap.class);
     assertThat(receivedFrames.get(1).presentationTimeUs).isEqualTo(0);
+    assertThat(receivedFrames.get(1).sequencePresentationTimeUs).isEqualTo(0);
   }
 
   @Test
@@ -226,20 +318,25 @@ public class HardwareBufferFrameReaderTest {
         new ConstantRateTimestampIterator(/* durationUs= */ 100_000, /* frameRate= */ 30f);
     Bitmap bitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888);
     // Queue 3 bitmaps and EOS. Only the first 2 should be output immediately, filling the capacity.
-    hardwareBufferFrameReader.outputBitmap(bitmap, threeFrames, /* indexOfItem= */ 0);
+    hardwareBufferFrameReader.outputBitmap(
+        bitmap, threeFrames, /* sequenceOffsetUs= */ 0, /* indexOfItem= */ 0);
     hardwareBufferFrameReader.queueEndOfStream();
     shadowOf(handlerThread.getLooper()).idle();
 
     assertThat(receivedFrames).hasSize(2);
     assertThat(receivedFrames.get(0).presentationTimeUs).isEqualTo(0);
+    assertThat(receivedFrames.get(0).sequencePresentationTimeUs).isEqualTo(0);
     assertThat(receivedFrames.get(1).presentationTimeUs).isEqualTo(33_333);
+    assertThat(receivedFrames.get(1).sequencePresentationTimeUs).isEqualTo(33_333);
 
     receivedFrames.remove(0).release(/* releaseFence= */ null);
     shadowOf(handlerThread.getLooper()).idle();
 
     assertThat(receivedFrames).hasSize(2);
     assertThat(receivedFrames.get(0).presentationTimeUs).isEqualTo(33_333);
+    assertThat(receivedFrames.get(0).sequencePresentationTimeUs).isEqualTo(33_333);
     assertThat(receivedFrames.get(1).presentationTimeUs).isEqualTo(66_667);
+    assertThat(receivedFrames.get(1).sequencePresentationTimeUs).isEqualTo(66_667);
     assertThat(threeFrames.hasNext()).isFalse();
 
     receivedFrames.remove(0).release(/* releaseFence= */ null);
@@ -247,6 +344,7 @@ public class HardwareBufferFrameReaderTest {
 
     assertThat(receivedFrames).hasSize(2);
     assertThat(receivedFrames.get(0).presentationTimeUs).isEqualTo(66_667);
+    assertThat(receivedFrames.get(0).sequencePresentationTimeUs).isEqualTo(66_667);
     assertThat(receivedFrames.get(1)).isEqualTo(HardwareBufferFrame.END_OF_STREAM_FRAME);
     assertThat(hardwareBufferFrameReaderException.get()).isNull();
   }
@@ -259,6 +357,7 @@ public class HardwareBufferFrameReaderTest {
     hardwareBufferFrameReader.outputBitmap(
         Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888),
         /* timestampIterator= */ thirtyFrames,
+        /* sequenceOffsetUs= */ 0,
         /* indexOfItem= */ 0);
 
     // Trying to output 30 frames, but HardwareBufferFrameReader#CAPACITY is only 2.

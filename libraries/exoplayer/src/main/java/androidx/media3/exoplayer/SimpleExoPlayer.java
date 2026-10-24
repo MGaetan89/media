@@ -429,6 +429,7 @@ public class SimpleExoPlayer extends BasePlayer implements ExoPlayer {
   /**
    * @param builder The {@link ExoPlayer.Builder} to obtain all construction parameters.
    */
+  @SuppressWarnings("nullness") // Accessing this in constructor.
   /* package */ SimpleExoPlayer(ExoPlayer.Builder builder) {
     constructorFinished = new ConditionVariable();
     try {
@@ -973,6 +974,12 @@ public class SimpleExoPlayer extends BasePlayer implements ExoPlayer {
   }
 
   @Override
+  public void setEnforceAdPlaybackOnTimelineRefresh(boolean enforceAdPlaybackOnTimelineRefresh) {
+    blockUntilConstructorFinished();
+    player.setEnforceAdPlaybackOnTimelineRefresh(enforceAdPlaybackOnTimelineRefresh);
+  }
+
+  @Override
   public @RepeatMode int getRepeatMode() {
     blockUntilConstructorFinished();
     return player.getRepeatMode();
@@ -1128,6 +1135,7 @@ public class SimpleExoPlayer extends BasePlayer implements ExoPlayer {
   }
 
   @Override
+  @Nullable
   public Renderer getSecondaryRenderer(int index) {
     blockUntilConstructorFinished();
     return player.getSecondaryRenderer(index);

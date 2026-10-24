@@ -18,6 +18,12 @@ package androidx.media3.transformer;
 
 import static androidx.media3.common.audio.AudioProcessor.EMPTY_BUFFER;
 import static androidx.media3.decoder.DecoderInputBuffer.BUFFER_REPLACEMENT_MODE_DIRECT;
+import static androidx.media3.effect.DebugTraceUtil.COMPONENT_AUDIO_GRAPH_INPUT;
+import static androidx.media3.effect.DebugTraceUtil.EVENT_ACCEPTED_INPUT;
+import static androidx.media3.effect.DebugTraceUtil.EVENT_FLUSH;
+import static androidx.media3.effect.DebugTraceUtil.EVENT_OUTPUT_ENDED;
+import static androidx.media3.effect.DebugTraceUtil.EVENT_PRODUCED_OUTPUT;
+import static androidx.media3.effect.DebugTraceUtil.EVENT_RELEASE;
 import static androidx.media3.transformer.AudioGraph.isInputAudioFormatValid;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
@@ -39,6 +45,7 @@ import androidx.media3.common.audio.ChannelMixingMatrix;
 import androidx.media3.common.audio.SonicAudioProcessor;
 import androidx.media3.common.audio.SpeedChangingAudioProcessor;
 import androidx.media3.decoder.DecoderInputBuffer;
+import androidx.media3.effect.DebugTraceUtil;
 import com.google.common.base.Supplier;
 import com.google.common.collect.ImmutableList;
 import java.nio.ByteBuffer;
@@ -76,8 +83,6 @@ import java.util.concurrent.atomic.AtomicLong;
 
   private final SilenceAppendingAudioProcessor silenceAppendingAudioProcessor;
 
-  private AudioFormat lastInputFormat;
-
   /**
    * Pipeline containing {@link AudioProcessor} instances to apply immediately before {@link
    * #userPipeline}.
@@ -106,6 +111,8 @@ import java.util.concurrent.atomic.AtomicLong;
   private boolean inputBlocked;
   private long currentItemExpectedInputDurationUs;
   private boolean isCurrentItemLast;
+  private boolean isReleased;
+  private boolean isEndLogged;
 
   /**
    * Creates an instance.
@@ -143,7 +150,6 @@ import java.util.concurrent.atomic.AtomicLong;
             preProcessingAudioFormat,
             requestedOutputAudioFormat,
             silenceAppendingAudioProcessor);
-    lastInputFormat = preProcessingAudioFormat;
     // APP configuration not active until flush called. getOutputAudioFormat based on active config.
     userPipeline.flush(StreamMetadata.DEFAULT);
     outputAudioFormat = userPipeline.getOutputAudioFormat();
@@ -168,15 +174,25 @@ import java.util.concurrent.atomic.AtomicLong;
    *     result of upstream changes.
    */
   public ByteBuffer getOutput() throws UnhandledAudioFormatException {
+    checkState(!isReleased);
     ByteBuffer outputBuffer = getOutputInternal();
 
     if (outputBuffer.hasRemaining()) {
+      DebugTraceUtil.logEvent(
+          COMPONENT_AUDIO_GRAPH_INPUT,
+          Integer.toHexString(this.hashCode()),
+          EVENT_PRODUCED_OUTPUT,
+          C.TIME_UNSET,
+          "size(bytes):%s",
+          outputBuffer.remaining());
       return outputBuffer;
     }
 
     if (!hasDataToOutput() && !pendingMediaItemChanges.isEmpty()) {
       configureForPendingMediaItemChange();
     }
+
+    maybeLogIsEnded();
 
     return EMPTY_BUFFER;
   }
@@ -195,6 +211,7 @@ import java.util.concurrent.atomic.AtomicLong;
       @Nullable Format decodedFormat,
       boolean isLast,
       @IntRange(from = 0) long positionOffsetUs) {
+    checkState(!isReleased);
     checkArgument(positionOffsetUs >= 0);
 
     if (decodedFormat == null) {
@@ -218,6 +235,7 @@ import java.util.concurrent.atomic.AtomicLong;
   @Override
   @Nullable
   public DecoderInputBuffer getInputBuffer() {
+    checkState(!isReleased);
     if (inputBlocked || !pendingMediaItemChanges.isEmpty()) {
       return null;
     }
@@ -231,6 +249,7 @@ import java.util.concurrent.atomic.AtomicLong;
    */
   @Override
   public boolean queueInputBuffer() {
+    checkState(!isReleased);
     if (inputBlocked) {
       return false;
     }
@@ -239,6 +258,12 @@ import java.util.concurrent.atomic.AtomicLong;
     pendingInputBuffers.add(inputBuffer);
     startTimeUs.compareAndSet(
         /* expectedValue= */ C.TIME_UNSET, /* newValue= */ inputBuffer.timeUs);
+    DebugTraceUtil.logEvent(
+        COMPONENT_AUDIO_GRAPH_INPUT,
+        Integer.toHexString(this.hashCode()),
+        EVENT_ACCEPTED_INPUT,
+        inputBuffer.timeUs,
+        "");
     return true;
   }
 
@@ -256,6 +281,7 @@ import java.util.concurrent.atomic.AtomicLong;
    * <p>Should only be called if the input thread and processing thread are the same.
    */
   public void blockInput() {
+    checkState(!isReleased);
     inputBlocked = true;
   }
 
@@ -265,6 +291,7 @@ import java.util.concurrent.atomic.AtomicLong;
    * <p>Should only be called if the input thread and processing thread are the same.
    */
   public void unblockInput() {
+    checkState(!isReleased);
     inputBlocked = false;
   }
 
@@ -284,6 +311,7 @@ import java.util.concurrent.atomic.AtomicLong;
    *     receiving input buffers after the flush.
    */
   public void flush(@IntRange(from = 0) long positionOffsetUs) {
+    checkState(!isReleased);
     checkArgument(positionOffsetUs >= 0);
     pendingMediaItemChanges.clear();
     processedFirstMediaItemChange = true;
@@ -299,23 +327,50 @@ import java.util.concurrent.atomic.AtomicLong;
     checkState(availableInputBuffers.size() == MAX_INPUT_BUFFER_COUNT);
     // positionOffsetUs and the output of preProcessingPipeline should be congruent, so we don't
     // allow preProcessingPipeline to modify the position offset.
-    preProcessingPipeline.flush(new StreamMetadata(positionOffsetUs));
-    userPipeline.flush(new StreamMetadata(positionOffsetUs));
+    StreamMetadata streamMetadata =
+        new StreamMetadata.Builder().setPositionOffsetUs(positionOffsetUs).build();
+    preProcessingPipeline.flush(streamMetadata);
+    userPipeline.flush(streamMetadata);
     receivedEndOfStreamFromInput = false;
     startTimeUs.set(C.TIME_UNSET);
     currentItemExpectedInputDurationUs = C.TIME_UNSET;
     isCurrentItemLast = false;
+    DebugTraceUtil.logEvent(
+        COMPONENT_AUDIO_GRAPH_INPUT,
+        Integer.toHexString(this.hashCode()),
+        EVENT_FLUSH,
+        C.TIME_UNSET,
+        "positionOffset:%s",
+        positionOffsetUs);
   }
 
   /**
-   * Releases any underlying resources.
+   * Unregisters the input from its {@link AudioGraph} and releases any resources it currently
+   * holds.
+   *
+   * <p>After release, any operation on the instance will throw an {@link IllegalStateException}.
    *
    * <p>Should only be called by the processing thread.
    */
   public void release() {
+    checkState(!isReleased);
     preProcessingPipeline.reset();
     userPipeline.reset();
-    lastInputFormat = AudioFormat.NOT_SET;
+    pendingMediaItemChanges.clear();
+    availableInputBuffers.clear();
+    pendingInputBuffers.clear();
+    isReleased = true;
+    DebugTraceUtil.logEvent(
+        COMPONENT_AUDIO_GRAPH_INPUT,
+        Integer.toHexString(this.hashCode()),
+        EVENT_RELEASE,
+        C.TIME_UNSET,
+        "");
+  }
+
+  /** Returns whether the instance has been {@linkplain #release() released.} */
+  public boolean isReleased() {
+    return isReleased;
   }
 
   /**
@@ -324,6 +379,10 @@ import java.util.concurrent.atomic.AtomicLong;
    * <p>Should only be called on the processing thread.
    */
   public boolean isEnded() {
+    if (isReleased) {
+      return true;
+    }
+
     if (hasDataToOutput()) {
       return false;
     }
@@ -339,6 +398,18 @@ import java.util.concurrent.atomic.AtomicLong;
     // For a looping sequence, currentItemExpectedInputDurationUs is unset, and
     // there isn't a last item -- end of stream is passed through directly.
     return receivedEndOfStreamFromInput;
+  }
+
+  private void maybeLogIsEnded() {
+    if (!isEndLogged && isEnded()) {
+      DebugTraceUtil.logEvent(
+          COMPONENT_AUDIO_GRAPH_INPUT,
+          Integer.toHexString(this.hashCode()),
+          EVENT_OUTPUT_ENDED,
+          C.TIME_UNSET,
+          "");
+      isEndLogged = true;
+    }
   }
 
   private ByteBuffer getOutputInternal() {
@@ -461,6 +532,8 @@ import java.util.concurrent.atomic.AtomicLong;
     } else { // Generating silence
       // No audio track. Generate silence based on video track duration after applying effects.
       if (pendingChange.editedMediaItem.effects.audioProcessors.isEmpty()) {
+        // TODO: b/495429335 - Remove audio effects with gaps or when generating silence for
+        // audio-removed items or audio-less items.
         // No audio track and no effects.
         // Generate silence based on video track duration after applying effects.
         currentItemExpectedInputDurationUs =
@@ -470,7 +543,8 @@ import java.util.concurrent.atomic.AtomicLong;
         // Generate audio track based on video duration, and apply effects.
         currentItemExpectedInputDurationUs = pendingChange.durationUs;
       }
-      pendingAudioFormat = lastInputFormat;
+      // Use requested output format when generating silence to match sequence format.
+      pendingAudioFormat = outputAudioFormat;
       startTimeUs.compareAndSet(/* expectedValue= */ C.TIME_UNSET, /* newValue= */ 0);
       onlyGenerateSilence = true;
     }
@@ -490,13 +564,14 @@ import java.util.concurrent.atomic.AtomicLong;
               postAudioFormat,
               /* requiredOutputAudioFormat= */ outputAudioFormat,
               silenceAppendingAudioProcessor);
-      lastInputFormat = postAudioFormat;
     }
 
     // positionOffsetUs and the output of preProcessingPipeline should be congruent, so we don't
     // allow preProcessingPipeline to modify the position offset.
-    preProcessingPipeline.flush(new StreamMetadata(pendingChange.positionOffsetUs));
-    userPipeline.flush(new StreamMetadata(pendingChange.positionOffsetUs));
+    StreamMetadata streamMetadata =
+        new StreamMetadata.Builder().setPositionOffsetUs(pendingChange.positionOffsetUs).build();
+    preProcessingPipeline.flush(streamMetadata);
+    userPipeline.flush(streamMetadata);
     receivedEndOfStreamFromInput = false;
     processedFirstMediaItemChange = true;
     if (onlyGenerateSilence) {

@@ -23,7 +23,6 @@ import static java.lang.annotation.ElementType.PARAMETER;
 import static java.lang.annotation.ElementType.TYPE_USE;
 
 import android.annotation.SuppressLint;
-import android.content.Context;
 import android.media.AudioAttributes;
 import android.media.AudioFormat;
 import android.media.AudioManager;
@@ -181,10 +180,12 @@ public final class C {
    * {@link #ENCODING_INVALID}, {@link #ENCODING_PCM_8BIT}, {@link #ENCODING_PCM_16BIT}, {@link
    * #ENCODING_PCM_16BIT_BIG_ENDIAN}, {@link #ENCODING_PCM_24BIT}, {@link
    * #ENCODING_PCM_24BIT_BIG_ENDIAN}, {@link #ENCODING_PCM_32BIT}, {@link
-   * #ENCODING_PCM_32BIT_BIG_ENDIAN}, {@link #ENCODING_PCM_FLOAT}, {@link #ENCODING_PCM_DOUBLE},
-   * {@link #ENCODING_MP3}, {@link #ENCODING_AC3}, {@link #ENCODING_E_AC3}, {@link
-   * #ENCODING_E_AC3_JOC}, {@link #ENCODING_AC4}, {@link #ENCODING_DTS}, {@link #ENCODING_DTS_HD},
-   * {@link #ENCODING_DOLBY_TRUEHD}, {@link #ENCODING_OPUS} or {@link #ENCODING_DSD}.
+   * #ENCODING_PCM_32BIT_BIG_ENDIAN}, {@link #ENCODING_PCM_FLOAT}, {@link
+   * #ENCODING_PCM_FLOAT_BIG_ENDIAN}, {@link #ENCODING_PCM_DOUBLE}, {@link
+   * #ENCODING_PCM_DOUBLE_BIG_ENDIAN}, {@link #ENCODING_MP3}, {@link #ENCODING_AC3}, {@link
+   * #ENCODING_E_AC3}, {@link #ENCODING_E_AC3_JOC}, {@link #ENCODING_AC4}, {@link #ENCODING_DTS},
+   * {@link #ENCODING_DTS_HD}, {@link #ENCODING_DOLBY_TRUEHD}, {@link #ENCODING_OPUS} or {@link
+   * #ENCODING_DSD}.
    */
   @Documented
   @Retention(RetentionPolicy.SOURCE)
@@ -200,7 +201,9 @@ public final class C {
     ENCODING_PCM_32BIT,
     ENCODING_PCM_32BIT_BIG_ENDIAN,
     ENCODING_PCM_FLOAT,
+    ENCODING_PCM_FLOAT_BIG_ENDIAN,
     ENCODING_PCM_DOUBLE,
+    ENCODING_PCM_DOUBLE_BIG_ENDIAN,
     ENCODING_MP3,
     ENCODING_AAC_LC,
     ENCODING_AAC_HE_V1,
@@ -226,7 +229,9 @@ public final class C {
    * {@link #ENCODING_INVALID}, {@link #ENCODING_PCM_8BIT}, {@link #ENCODING_PCM_16BIT}, {@link
    * #ENCODING_PCM_16BIT_BIG_ENDIAN}, {@link #ENCODING_PCM_24BIT}, {@link
    * #ENCODING_PCM_24BIT_BIG_ENDIAN}, {@link #ENCODING_PCM_32BIT}, {@link
-   * #ENCODING_PCM_32BIT_BIG_ENDIAN}, {@link #ENCODING_PCM_FLOAT}, {@link #ENCODING_PCM_DOUBLE}.
+   * #ENCODING_PCM_32BIT_BIG_ENDIAN}, {@link #ENCODING_PCM_FLOAT}, {@link
+   * #ENCODING_PCM_FLOAT_BIG_ENDIAN}, {@link #ENCODING_PCM_DOUBLE}, {@link
+   * #ENCODING_PCM_DOUBLE_BIG_ENDIAN}.
    */
   @Documented
   @Retention(RetentionPolicy.SOURCE)
@@ -242,7 +247,9 @@ public final class C {
     ENCODING_PCM_32BIT,
     ENCODING_PCM_32BIT_BIG_ENDIAN,
     ENCODING_PCM_FLOAT,
-    ENCODING_PCM_DOUBLE
+    ENCODING_PCM_FLOAT_BIG_ENDIAN,
+    ENCODING_PCM_DOUBLE,
+    ENCODING_PCM_DOUBLE_BIG_ENDIAN
   })
   public @interface PcmEncoding {}
 
@@ -273,8 +280,14 @@ public final class C {
   /** See {@link AudioFormat#ENCODING_PCM_FLOAT}. */
   public static final int ENCODING_PCM_FLOAT = AudioFormat.ENCODING_PCM_FLOAT;
 
+  /** Like {@link #ENCODING_PCM_FLOAT} but with the bytes in big endian order. */
+  @UnstableApi public static final int ENCODING_PCM_FLOAT_BIG_ENDIAN = 0x71000000;
+
   /** PCM encoding with double-precision floating point samples. */
   @UnstableApi public static final int ENCODING_PCM_DOUBLE = 0x70000000;
+
+  /** Like {@link #ENCODING_PCM_DOUBLE} but with the bytes in big endian order. */
+  @UnstableApi public static final int ENCODING_PCM_DOUBLE_BIG_ENDIAN = 0x72000000;
 
   /** See {@link AudioFormat#ENCODING_MP3}. */
   public static final int ENCODING_MP3 = AudioFormat.ENCODING_MP3;
@@ -1841,18 +1854,6 @@ public final class C {
   @Deprecated
   public static long msToUs(long timeMs) {
     return Util.msToUs(timeMs);
-  }
-
-  /**
-   * @deprecated Use {@link Util#generateAudioSessionIdV21(Context)}.
-   */
-  @UnstableApi
-  @InlineMe(
-      replacement = "Util.generateAudioSessionIdV21(context)",
-      imports = {"androidx.media3.common.util.Util"})
-  @Deprecated
-  public static int generateAudioSessionIdV21(Context context) {
-    return Util.generateAudioSessionIdV21(context);
   }
 
   /**

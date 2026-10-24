@@ -35,10 +35,12 @@ import org.junit.runner.RunWith;
 public class VideoFrameReleaseControlTest {
 
   private Surface surface;
+  private FixedFrameRateEstimator frameRateEstimator;
 
   @Before
   public void setUp() {
     surface = new Surface(new SurfaceTexture(/* texName= */ 0));
+    frameRateEstimator = new FixedFrameRateEstimator(frameRate -> {});
   }
 
   @After
@@ -79,14 +81,17 @@ public class VideoFrameReleaseControlTest {
     videoFrameReleaseControl.setOutputSurface(/* outputSurface= */ null);
 
     // Process decode-only frame to ensure it doesn't make the release control ready.
-    videoFrameReleaseControl.getFrameReleaseAction(
-        /* presentationTimeUs= */ 0,
-        /* positionUs= */ 0,
-        /* elapsedRealtimeUs= */ 0,
-        /* outputStreamStartPositionUs= */ 0,
-        /* isDecodeOnlyFrame= */ true,
-        /* isLastFrame= */ false,
-        frameReleaseInfo);
+    int unused =
+        videoFrameReleaseControl.getFrameReleaseAction(
+            /* presentationTimeUs= */ 0,
+            /* positionUs= */ 0,
+            /* elapsedRealtimeUs= */ 0,
+            /* outputStreamStartPositionUs= */ 0,
+            /* isDecodeOnlyFrame= */ true,
+            /* isLastFrame= */ false,
+            frameRateEstimator.getFrameDurationNs(),
+            /* frameIndex= */ 0L,
+            frameReleaseInfo);
 
     assertThat(videoFrameReleaseControl.isReady(/* otherwiseReady= */ true)).isFalse();
   }
@@ -99,14 +104,17 @@ public class VideoFrameReleaseControlTest {
     videoFrameReleaseControl.setOutputSurface(/* outputSurface= */ null);
 
     // Process first frame.
-    videoFrameReleaseControl.getFrameReleaseAction(
-        /* presentationTimeUs= */ 0,
-        /* positionUs= */ 0,
-        /* elapsedRealtimeUs= */ 0,
-        /* outputStreamStartPositionUs= */ 0,
-        /* isDecodeOnlyFrame= */ false,
-        /* isLastFrame= */ false,
-        frameReleaseInfo);
+    int unused =
+        videoFrameReleaseControl.getFrameReleaseAction(
+            /* presentationTimeUs= */ 0,
+            /* positionUs= */ 0,
+            /* elapsedRealtimeUs= */ 0,
+            /* outputStreamStartPositionUs= */ 0,
+            /* isDecodeOnlyFrame= */ false,
+            /* isLastFrame= */ false,
+            frameRateEstimator.getFrameDurationNs(),
+            /* frameIndex= */ 0L,
+            frameReleaseInfo);
 
     assertThat(videoFrameReleaseControl.isReady(/* otherwiseReady= */ true)).isTrue();
   }
@@ -119,14 +127,17 @@ public class VideoFrameReleaseControlTest {
     videoFrameReleaseControl.setOutputSurface(/* outputSurface= */ null);
 
     // Process first frame.
-    videoFrameReleaseControl.getFrameReleaseAction(
-        /* presentationTimeUs= */ 0,
-        /* positionUs= */ 0,
-        /* elapsedRealtimeUs= */ 0,
-        /* outputStreamStartPositionUs= */ 0,
-        /* isDecodeOnlyFrame= */ false,
-        /* isLastFrame= */ false,
-        frameReleaseInfo);
+    int unused =
+        videoFrameReleaseControl.getFrameReleaseAction(
+            /* presentationTimeUs= */ 0,
+            /* positionUs= */ 0,
+            /* elapsedRealtimeUs= */ 0,
+            /* outputStreamStartPositionUs= */ 0,
+            /* isDecodeOnlyFrame= */ false,
+            /* isLastFrame= */ false,
+            frameRateEstimator.getFrameDurationNs(),
+            /* frameIndex= */ 0L,
+            frameReleaseInfo);
     assertThat(videoFrameReleaseControl.isReady(/* otherwiseReady= */ true)).isTrue();
 
     videoFrameReleaseControl.reset();
@@ -143,14 +154,17 @@ public class VideoFrameReleaseControlTest {
     videoFrameReleaseControl.setOutputSurface(/* outputSurface= */ null);
 
     // Process first frame.
-    videoFrameReleaseControl.getFrameReleaseAction(
-        /* presentationTimeUs= */ 0,
-        /* positionUs= */ 0,
-        /* elapsedRealtimeUs= */ 0,
-        /* outputStreamStartPositionUs= */ 0,
-        /* isDecodeOnlyFrame= */ false,
-        /* isLastFrame= */ false,
-        frameReleaseInfo);
+    int unused =
+        videoFrameReleaseControl.getFrameReleaseAction(
+            /* presentationTimeUs= */ 0,
+            /* positionUs= */ 0,
+            /* elapsedRealtimeUs= */ 0,
+            /* outputStreamStartPositionUs= */ 0,
+            /* isDecodeOnlyFrame= */ false,
+            /* isLastFrame= */ false,
+            frameRateEstimator.getFrameDurationNs(),
+            /* frameIndex= */ 0L,
+            frameReleaseInfo);
 
     assertThat(videoFrameReleaseControl.isReady(/* otherwiseReady= */ true)).isTrue();
   }
@@ -164,14 +178,17 @@ public class VideoFrameReleaseControlTest {
     videoFrameReleaseControl.setOutputSurface(/* outputSurface= */ null);
 
     // Process first frame.
-    videoFrameReleaseControl.getFrameReleaseAction(
-        /* presentationTimeUs= */ 0,
-        /* positionUs= */ 0,
-        /* elapsedRealtimeUs= */ 0,
-        /* outputStreamStartPositionUs= */ 0,
-        /* isDecodeOnlyFrame= */ false,
-        /* isLastFrame= */ false,
-        frameReleaseInfo);
+    int unused =
+        videoFrameReleaseControl.getFrameReleaseAction(
+            /* presentationTimeUs= */ 0,
+            /* positionUs= */ 0,
+            /* elapsedRealtimeUs= */ 0,
+            /* outputStreamStartPositionUs= */ 0,
+            /* isDecodeOnlyFrame= */ false,
+            /* isLastFrame= */ false,
+            frameRateEstimator.getFrameDurationNs(),
+            /* frameIndex= */ 0L,
+            frameReleaseInfo);
     assertThat(videoFrameReleaseControl.isReady(/* otherwiseReady= */ true)).isTrue();
 
     videoFrameReleaseControl.reset();
@@ -281,6 +298,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                /* frameIndex= */ 0L,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_IMMEDIATELY);
   }
@@ -301,6 +320,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                /* frameIndex= */ 0L,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_TRY_AGAIN_LATER);
   }
@@ -326,6 +347,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                /* frameIndex= */ 0L,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_IMMEDIATELY);
   }
@@ -350,6 +373,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                /* frameIndex= */ 0L,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_IMMEDIATELY);
     videoFrameReleaseControl.onFrameReleasedIsFirstFrame();
@@ -363,6 +388,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                /* frameIndex= */ 0L,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_SCHEDULED);
   }
@@ -376,6 +403,7 @@ public class VideoFrameReleaseControlTest {
     VideoFrameReleaseControl videoFrameReleaseControl = createVideoFrameReleaseControl();
     videoFrameReleaseControl.setClock(clock);
     videoFrameReleaseControl.onStreamChanged(RELEASE_FIRST_FRAME_IMMEDIATELY);
+    long frameIndex = 0L;
 
     // First frame released.
     assertThat(
@@ -386,6 +414,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_IMMEDIATELY);
     videoFrameReleaseControl.onFrameReleasedIsFirstFrame();
@@ -399,6 +429,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_TRY_AGAIN_LATER);
   }
@@ -413,6 +445,7 @@ public class VideoFrameReleaseControlTest {
     videoFrameReleaseControl.setClock(clock);
     videoFrameReleaseControl.onStreamChanged(RELEASE_FIRST_FRAME_IMMEDIATELY);
     videoFrameReleaseControl.onStarted();
+    long frameIndex = 0L;
 
     // First frame released.
     assertThat(
@@ -423,6 +456,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_IMMEDIATELY);
     videoFrameReleaseControl.onFrameReleasedIsFirstFrame();
@@ -436,6 +471,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_TRY_AGAIN_LATER);
   }
@@ -450,6 +487,7 @@ public class VideoFrameReleaseControlTest {
     VideoFrameReleaseControl videoFrameReleaseControl = createVideoFrameReleaseControl();
     videoFrameReleaseControl.setClock(clock);
     videoFrameReleaseControl.onStreamChanged(RELEASE_FIRST_FRAME_IMMEDIATELY);
+    long frameIndex = 0L;
 
     // First frame released.
     assertThat(
@@ -460,6 +498,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_IMMEDIATELY);
     videoFrameReleaseControl.onFrameReleasedIsFirstFrame();
@@ -474,6 +514,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_TRY_AGAIN_LATER);
 
@@ -486,6 +528,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_SCHEDULED);
   }
@@ -501,6 +545,7 @@ public class VideoFrameReleaseControlTest {
     videoFrameReleaseControl.onStreamChanged(RELEASE_FIRST_FRAME_IMMEDIATELY);
 
     videoFrameReleaseControl.onStarted();
+    long frameIndex = 0L;
 
     // First frame released.
     assertThat(
@@ -511,6 +556,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_IMMEDIATELY);
     videoFrameReleaseControl.onFrameReleasedIsFirstFrame();
@@ -525,8 +572,56 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_TRY_AGAIN_LATER);
+  }
+
+  @Test
+  public void getFrameReleaseAction_customEarlySchedulingThreshold_returnsFrameReleaseScheduled()
+      throws ExoPlaybackException {
+    VideoFrameReleaseControl.FrameReleaseInfo frameReleaseInfo =
+        new VideoFrameReleaseControl.FrameReleaseInfo();
+    FakeClock clock = new FakeClock(/* isAutoAdvancing= */ false);
+    VideoFrameReleaseControl videoFrameReleaseControl = createVideoFrameReleaseControl();
+    videoFrameReleaseControl.setClock(clock);
+    videoFrameReleaseControl.onStreamChanged(RELEASE_FIRST_FRAME_IMMEDIATELY);
+    videoFrameReleaseControl.setEarlySchedulingThresholdUs(100_000);
+    videoFrameReleaseControl.onStarted();
+
+    long frameIndex = 0L;
+    // First frame released.
+    assertThat(
+            videoFrameReleaseControl.getFrameReleaseAction(
+                /* presentationTimeUs= */ 0,
+                /* positionUs= */ 0,
+                /* elapsedRealtimeUs= */ 0,
+                /* outputStreamStartPositionUs= */ 0,
+                /* isDecodeOnlyFrame= */ false,
+                /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
+                frameReleaseInfo))
+        .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_IMMEDIATELY);
+    videoFrameReleaseControl.onFrameReleasedIsFirstFrame();
+    clock.advanceTime(/* timeDiffMs= */ 10);
+
+    // Second frame is 60 ms too soon (presentationTimeUs = 100_000, positionUs = 40_000).
+    // Default threshold is 50ms, so it would return TRY_AGAIN_LATER.
+    // With 100ms threshold, it should return FRAME_RELEASE_SCHEDULED.
+    assertThat(
+            videoFrameReleaseControl.getFrameReleaseAction(
+                /* presentationTimeUs= */ 100_000,
+                /* positionUs= */ 40_000,
+                /* elapsedRealtimeUs= */ 10_000,
+                /* outputStreamStartPositionUs= */ 0,
+                /* isDecodeOnlyFrame= */ false,
+                /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
+                frameReleaseInfo))
+        .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_SCHEDULED);
   }
 
   @Test
@@ -548,6 +643,7 @@ public class VideoFrameReleaseControlTest {
     videoFrameReleaseControl.setClock(clock);
     videoFrameReleaseControl.onStreamChanged(RELEASE_FIRST_FRAME_IMMEDIATELY);
     videoFrameReleaseControl.onStarted();
+    long frameIndex = 0L;
 
     // First frame released.
     assertThat(
@@ -558,6 +654,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_IMMEDIATELY);
     videoFrameReleaseControl.onFrameReleasedIsFirstFrame();
@@ -571,6 +669,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_IMMEDIATELY);
   }
@@ -594,6 +694,7 @@ public class VideoFrameReleaseControlTest {
     videoFrameReleaseControl.onStreamChanged(RELEASE_FIRST_FRAME_IMMEDIATELY);
 
     // First frame released.
+    long frameIndex = 0L;
     assertThat(
             videoFrameReleaseControl.getFrameReleaseAction(
                 /* presentationTimeUs= */ 0,
@@ -602,6 +703,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_IMMEDIATELY);
     videoFrameReleaseControl.onFrameReleasedIsFirstFrame();
@@ -615,6 +718,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_TRY_AGAIN_LATER);
   }
@@ -639,6 +744,7 @@ public class VideoFrameReleaseControlTest {
     videoFrameReleaseControl.onStarted();
 
     // First frame released.
+    long frameIndex = 0L;
     assertThat(
             videoFrameReleaseControl.getFrameReleaseAction(
                 /* presentationTimeUs= */ 0,
@@ -647,6 +753,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_IMMEDIATELY);
     videoFrameReleaseControl.onFrameReleasedIsFirstFrame();
@@ -660,6 +768,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_TRY_AGAIN_LATER);
   }
@@ -684,6 +794,7 @@ public class VideoFrameReleaseControlTest {
     videoFrameReleaseControl.onStreamChanged(RELEASE_FIRST_FRAME_IMMEDIATELY);
     videoFrameReleaseControl.onStarted();
     // First frame released.
+    long frameIndex = 0L;
     assertThat(
             videoFrameReleaseControl.getFrameReleaseAction(
                 /* presentationTimeUs= */ 0,
@@ -692,6 +803,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_IMMEDIATELY);
     videoFrameReleaseControl.onFrameReleasedIsFirstFrame();
@@ -706,6 +819,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_IMMEDIATELY);
   }
@@ -730,6 +845,7 @@ public class VideoFrameReleaseControlTest {
     videoFrameReleaseControl.onStreamChanged(RELEASE_FIRST_FRAME_IMMEDIATELY);
 
     // First frame released.
+    long frameIndex = 0L;
     assertThat(
             videoFrameReleaseControl.getFrameReleaseAction(
                 /* presentationTimeUs= */ 0,
@@ -738,6 +854,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_IMMEDIATELY);
     videoFrameReleaseControl.onFrameReleasedIsFirstFrame();
@@ -752,6 +870,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_TRY_AGAIN_LATER);
 
@@ -764,6 +884,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_IMMEDIATELY);
   }
@@ -788,6 +910,7 @@ public class VideoFrameReleaseControlTest {
     videoFrameReleaseControl.onStarted();
 
     // First frame released.
+    long frameIndex = 0L;
     assertThat(
             videoFrameReleaseControl.getFrameReleaseAction(
                 /* presentationTimeUs= */ 0,
@@ -796,6 +919,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_IMMEDIATELY);
     videoFrameReleaseControl.onFrameReleasedIsFirstFrame();
@@ -810,6 +935,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_DROP);
   }
@@ -838,6 +965,7 @@ public class VideoFrameReleaseControlTest {
     videoFrameReleaseControl.join(/* renderNextFrameImmediately= */ false);
 
     // First output is TRY_AGAIN_LATER because the time hasn't moved yet
+    long frameIndex = 0L;
     assertThat(
             videoFrameReleaseControl.getFrameReleaseAction(
                 /* presentationTimeUs= */ 5_000,
@@ -846,6 +974,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_TRY_AGAIN_LATER);
     // Late frame should be marked as skipped
@@ -857,6 +987,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_SKIP);
   }
@@ -885,6 +1017,7 @@ public class VideoFrameReleaseControlTest {
     videoFrameReleaseControl.join(/* renderNextFrameImmediately= */ true);
 
     // First output is to force render the next frame.
+    long frameIndex = 0L;
     assertThat(
             videoFrameReleaseControl.getFrameReleaseAction(
                 /* presentationTimeUs= */ 5_000,
@@ -893,6 +1026,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_IMMEDIATELY);
     videoFrameReleaseControl.onFrameReleasedIsFirstFrame();
@@ -905,6 +1040,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_DROP);
   }
@@ -929,6 +1066,7 @@ public class VideoFrameReleaseControlTest {
     videoFrameReleaseControl.onStarted();
 
     // First frame released.
+    long frameIndex = 0L;
     assertThat(
             videoFrameReleaseControl.getFrameReleaseAction(
                 /* presentationTimeUs= */ 0,
@@ -937,6 +1075,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_IMMEDIATELY);
     videoFrameReleaseControl.onFrameReleasedIsFirstFrame();
@@ -950,6 +1090,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_IGNORE);
   }
@@ -961,6 +1103,7 @@ public class VideoFrameReleaseControlTest {
     VideoFrameReleaseControl videoFrameReleaseControl = createVideoFrameReleaseControl();
     videoFrameReleaseControl.onStreamChanged(RELEASE_FIRST_FRAME_IMMEDIATELY);
 
+    long frameIndex = 0L;
     assertThat(
             videoFrameReleaseControl.getFrameReleaseAction(
                 /* presentationTimeUs= */ 0,
@@ -969,6 +1112,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ true,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_SKIP);
   }
@@ -981,6 +1126,7 @@ public class VideoFrameReleaseControlTest {
     VideoFrameReleaseControl videoFrameReleaseControl = createVideoFrameReleaseControl();
     videoFrameReleaseControl.onStreamChanged(RELEASE_FIRST_FRAME_IMMEDIATELY);
 
+    long frameIndex = 0L;
     assertThat(
             videoFrameReleaseControl.getFrameReleaseAction(
                 /* presentationTimeUs= */ 0,
@@ -989,6 +1135,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ true,
                 /* isLastFrame= */ true,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(RELEASE_FIRST_FRAME_IMMEDIATELY);
   }
@@ -1001,6 +1149,7 @@ public class VideoFrameReleaseControlTest {
     videoFrameReleaseControl.setOutputSurface(/* outputSurface= */ null);
     videoFrameReleaseControl.onStreamChanged(RELEASE_FIRST_FRAME_IMMEDIATELY);
 
+    long frameIndex = 0L;
     assertThat(
             videoFrameReleaseControl.getFrameReleaseAction(
                 /* presentationTimeUs= */ 0,
@@ -1009,6 +1158,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ true,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_SKIP);
   }
@@ -1023,6 +1174,7 @@ public class VideoFrameReleaseControlTest {
     videoFrameReleaseControl.setClock(clock);
     videoFrameReleaseControl.onStreamChanged(RELEASE_FIRST_FRAME_IMMEDIATELY);
 
+    long frameIndex = 0L;
     assertThat(
             videoFrameReleaseControl.getFrameReleaseAction(
                 /* presentationTimeUs= */ 100_000,
@@ -1031,6 +1183,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_TRY_AGAIN_LATER);
   }
@@ -1052,6 +1206,7 @@ public class VideoFrameReleaseControlTest {
     videoFrameReleaseControl.setClock(clock);
     videoFrameReleaseControl.onStreamChanged(RELEASE_FIRST_FRAME_IMMEDIATELY);
 
+    long frameIndex = 0L;
     assertThat(
             videoFrameReleaseControl.getFrameReleaseAction(
                 /* presentationTimeUs= */ 100_000,
@@ -1060,6 +1215,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_IGNORE);
   }
@@ -1075,6 +1232,7 @@ public class VideoFrameReleaseControlTest {
     videoFrameReleaseControl.setClock(clock);
     videoFrameReleaseControl.onStreamChanged(RELEASE_FIRST_FRAME_IMMEDIATELY);
 
+    long frameIndex = 0L;
     assertThat(
             videoFrameReleaseControl.getFrameReleaseAction(
                 /* presentationTimeUs= */ 100_000,
@@ -1083,6 +1241,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_TRY_AGAIN_LATER);
   }
@@ -1099,6 +1259,7 @@ public class VideoFrameReleaseControlTest {
     videoFrameReleaseControl.onStreamChanged(RELEASE_FIRST_FRAME_IMMEDIATELY);
 
     videoFrameReleaseControl.onStarted();
+    long frameIndex = 0L;
     assertThat(
             videoFrameReleaseControl.getFrameReleaseAction(
                 /* presentationTimeUs= */ 100_000,
@@ -1107,6 +1268,8 @@ public class VideoFrameReleaseControlTest {
                 /* outputStreamStartPositionUs= */ 0,
                 /* isDecodeOnlyFrame= */ false,
                 /* isLastFrame= */ false,
+                frameRateEstimator.getFrameDurationNs(),
+                frameIndex++,
                 frameReleaseInfo))
         .isEqualTo(VideoFrameReleaseControl.FRAME_RELEASE_SKIP);
   }
@@ -1122,6 +1285,9 @@ public class VideoFrameReleaseControlTest {
             new TestFrameTimingEvaluator(),
             allowedJoiningTimeMs);
     videoFrameReleaseControl.setOutputSurface(surface);
+    frameRateEstimator =
+        new FixedFrameRateEstimator(
+            frameRate -> videoFrameReleaseControl.setSurfaceMediaFrameRate(frameRate));
     return videoFrameReleaseControl;
   }
 

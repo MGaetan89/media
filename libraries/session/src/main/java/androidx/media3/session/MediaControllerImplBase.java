@@ -108,7 +108,9 @@ import java.util.concurrent.TimeoutException;
 import org.checkerframework.checker.initialization.qual.UnderInitialization;
 import org.checkerframework.checker.nullness.qual.NonNull;
 
-@SuppressWarnings("FutureReturnValueIgnored") // TODO(b/138091975): Not to ignore if feasible
+// TODO: b/138091975 - Don't ignore future return values if feasible.
+// TODO: b/78934030 - Add missing nullness checks to this class.
+@SuppressWarnings({"FutureReturnValueIgnored", "nullness"})
 /* package */ class MediaControllerImplBase implements MediaControllerImpl {
 
   public static final String TAG = "MCImplBase";
@@ -2868,10 +2870,11 @@ import org.checkerframework.checker.nullness.qual.NonNull;
             SessionToken.TYPE_SESSION,
             result.libraryVersion,
             result.sessionInterfaceVersion,
-            token.getPackageName(),
+            token.getOriginalPackageName(),
             result.sessionBinder,
             result.tokenExtras,
-            platformToken);
+            platformToken,
+            result.packageNameOverride);
     sessionExtras = result.sessionExtras;
     getInstance().notifyAccepted();
   }
@@ -2971,11 +2974,17 @@ import org.checkerframework.checker.nullness.qual.NonNull;
             checkNotNull(connectedToken));
     PlayerInfo finalPlayerInfo = playerInfo;
 
+    // Discontinuity events are only emitted if both timelines are not empty, or if it's a seek
+    // discontinuity which is emitted even when the player is empty.
+    boolean seekOrNonEmptyTimeline =
+        finalPlayerInfo.discontinuityReason == DISCONTINUITY_REASON_SEEK
+            || (!oldPlayerInfo.timeline.isEmpty() && !finalPlayerInfo.timeline.isEmpty());
     @Nullable
     @Player.DiscontinuityReason
     Integer positionDiscontinuityReason =
-        (!oldPlayerInfo.oldPositionInfo.equals(newPlayerInfo.oldPositionInfo)
-                || !oldPlayerInfo.newPositionInfo.equals(newPlayerInfo.newPositionInfo))
+        (seekOrNonEmptyTimeline
+                && (!oldPlayerInfo.oldPositionInfo.equals(finalPlayerInfo.oldPositionInfo)
+                    || !oldPlayerInfo.newPositionInfo.equals(finalPlayerInfo.newPositionInfo)))
             ? finalPlayerInfo.discontinuityReason
             : null;
 

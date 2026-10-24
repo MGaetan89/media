@@ -447,6 +447,10 @@ public class RemoteMediaSession {
       binder.notifyTimelineChanged(sessionId, reason);
     }
 
+    public void notifyTimelineChangedWithMediaItemTransition() throws RemoteException {
+      binder.notifyTimelineChangedWithMediaItemTransition(sessionId);
+    }
+
     public void notifyPlaylistMetadataChanged() throws RemoteException {
       binder.notifyPlaylistMetadataChanged(sessionId);
     }
@@ -542,12 +546,20 @@ public class RemoteMediaSession {
 
     if (bound) {
       try {
-        countDownLatch.await(SERVICE_CONNECTION_TIMEOUT_MS, MILLISECONDS);
+        if (!countDownLatch.await(SERVICE_CONNECTION_TIMEOUT_MS, MILLISECONDS)) {
+          Log.e(TAG, "Failed to connect to the MediaSessionProviderService: timeout");
+        }
       } catch (InterruptedException e) {
         Log.e(TAG, "InterruptedException while waiting for onServiceConnected.", e);
       }
     }
-    return binder != null;
+    if (binder == null) {
+      if (bound) {
+        context.unbindService(serviceConnection);
+      }
+      return false;
+    }
+    return true;
   }
 
   /** Disconnects from service app's MediaSessionProviderService. */

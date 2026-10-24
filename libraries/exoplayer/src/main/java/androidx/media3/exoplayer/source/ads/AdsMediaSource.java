@@ -54,7 +54,9 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 import org.checkerframework.checker.nullness.qual.RequiresNonNull;
@@ -151,6 +153,7 @@ public final class AdsMediaSource extends CompositeMediaSource<MediaPeriodId> {
   private final boolean useLazyContentSourcePreparation;
   private final boolean useAdMediaSourceClipping;
   private final List<AdMediaSourceHolder> activeMediaSourceHolders;
+  private final Map<ClippingMediaPeriod, Integer> activeContentClippingMediaPeriods;
 
   // Accessed on the player thread.
   @Nullable private ComponentListener componentListener;
@@ -243,6 +246,7 @@ public final class AdsMediaSource extends CompositeMediaSource<MediaPeriodId> {
     period = new Timeline.Period();
     adMediaSourceHolders = new AdMediaSourceHolder[0][];
     activeMediaSourceHolders = new ArrayList<>();
+    activeContentClippingMediaPeriods = new HashMap<>();
     adsLoader.setSupportedContentTypes(adMediaSourceFactory.getSupportedTypes());
   }
 
@@ -318,10 +322,23 @@ public final class AdsMediaSource extends CompositeMediaSource<MediaPeriodId> {
       return adMediaSourceHolder.createMediaPeriod(
           id, allocator, startPositionUs, useAdMediaSourceClipping);
     } else {
-      MaskingMediaPeriod mediaPeriod = new MaskingMediaPeriod(id, allocator, startPositionUs);
-      mediaPeriod.setMediaSource(contentMediaSource);
-      mediaPeriod.createPeriod(id);
-      return mediaPeriod;
+      MediaPeriodId contentMediaPeriodId = new MediaPeriodId(id.periodUid, id.windowSequenceNumber);
+      MaskingMediaPeriod maskingMediaPeriod =
+          new MaskingMediaPeriod(contentMediaPeriodId, allocator, startPositionUs);
+      maskingMediaPeriod.setMediaSource(contentMediaSource);
+      maskingMediaPeriod.createPeriod(contentMediaPeriodId);
+      if (id.nextAdGroupIndex == C.INDEX_UNSET) {
+        return maskingMediaPeriod;
+      }
+      long nextAdGroupTimeUs = adPlaybackState.getAdGroup(id.nextAdGroupIndex).timeUs;
+      ClippingMediaPeriod clippingMediaPeriod =
+          new ClippingMediaPeriod(
+              maskingMediaPeriod,
+              /* enableInitialDiscontinuity= */ true,
+              /* startUs= */ 0,
+              /* endUs= */ nextAdGroupTimeUs);
+      activeContentClippingMediaPeriods.put(clippingMediaPeriod, id.nextAdGroupIndex);
+      return clippingMediaPeriod;
     }
   }
 
@@ -343,6 +360,9 @@ public final class AdsMediaSource extends CompositeMediaSource<MediaPeriodId> {
         activeMediaSourceHolders.remove(adMediaSourceHolder);
       }
     } else {
+      if (mediaPeriod instanceof ClippingMediaPeriod) {
+        activeContentClippingMediaPeriods.remove(mediaPeriod);
+      }
       maskingMediaPeriod.releasePeriod();
     }
   }
@@ -425,6 +445,14 @@ public final class AdsMediaSource extends CompositeMediaSource<MediaPeriodId> {
           }
         }
       }
+      for (Map.Entry<ClippingMediaPeriod, Integer> activeClippingPeriod :
+          activeContentClippingMediaPeriods.entrySet()) {
+        int nextAdGroupIndex = activeClippingPeriod.getValue();
+        long nextAdGroupTimeUs = adPlaybackState.getAdGroup(nextAdGroupIndex).timeUs;
+        activeClippingPeriod
+            .getKey()
+            .updateClipping(/* startUs= */ 0, /* endUs= */ nextAdGroupTimeUs);
+      }
     }
     this.adPlaybackState = adPlaybackState;
     maybeUpdateAdMediaSources();
@@ -446,11 +474,14 @@ public final class AdsMediaSource extends CompositeMediaSource<MediaPeriodId> {
         break;
       }
       AdGroup newAdGroup = newAdPlaybackState.getAdGroup(i);
-      checkState(oldAdGroup.count <= newAdGroup.count);
       checkState(oldAdGroup.timeUs == newAdGroup.timeUs);
-      for (int j = 0; j < oldAdGroup.count; j++) {
-        if (oldAdGroup.mediaItems[j] != null) {
-          checkState(oldAdGroup.mediaItems[j].equals(newAdGroup.mediaItems[j]));
+      if (oldAdGroup.hasUnplayedAds()) {
+        checkState(oldAdGroup.count <= newAdGroup.count);
+        for (int j = 0; j < oldAdGroup.count; j++) {
+          MediaItem oldMediaItem = oldAdGroup.mediaItems[j];
+          if (oldMediaItem != null && oldAdGroup.states[j] == AdPlaybackState.AD_STATE_AVAILABLE) {
+            checkState(oldMediaItem.equals(newAdGroup.mediaItems[j]));
+          }
         }
       }
     }
@@ -597,10 +628,11 @@ public final class AdsMediaSource extends CompositeMediaSource<MediaPeriodId> {
       }
       createEventDispatcher(/* mediaPeriodId= */ null)
           .loadError(
-              new LoadEventInfo(
-                  LoadEventInfo.getNewId(),
-                  dataSpec,
-                  /* elapsedRealtimeMs= */ SystemClock.elapsedRealtime()),
+              new LoadEventInfo.Builder(
+                      LoadEventInfo.getNewId(),
+                      dataSpec,
+                      /* elapsedRealtimeMs= */ SystemClock.elapsedRealtime())
+                  .build(),
               C.DATA_TYPE_AD,
               error,
               /* wasCanceled= */ true);
@@ -629,10 +661,11 @@ public final class AdsMediaSource extends CompositeMediaSource<MediaPeriodId> {
     public void onPrepareError(MediaPeriodId mediaPeriodId, IOException exception) {
       createEventDispatcher(mediaPeriodId)
           .loadError(
-              new LoadEventInfo(
-                  LoadEventInfo.getNewId(),
-                  new DataSpec(checkNotNull(adMediaItem.localConfiguration).uri),
-                  /* elapsedRealtimeMs= */ SystemClock.elapsedRealtime()),
+              new LoadEventInfo.Builder(
+                      LoadEventInfo.getNewId(),
+                      new DataSpec(checkNotNull(adMediaItem.localConfiguration).uri),
+                      /* elapsedRealtimeMs= */ SystemClock.elapsedRealtime())
+                  .build(),
               C.DATA_TYPE_AD,
               AdLoadException.createForAd(exception),
               /* wasCanceled= */ true);

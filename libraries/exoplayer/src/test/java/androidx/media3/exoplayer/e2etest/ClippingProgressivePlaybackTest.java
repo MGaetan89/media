@@ -52,12 +52,18 @@ import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import com.google.testing.junit.testparameterinjector.TestParameter;
 import java.util.List;
 import java.util.Map;
+import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestParameterInjector;
+import org.robolectric.annotation.Config;
 
 /** End-to-end tests for the behavior of clipping with progressive media. */
+// TODO: b/511055213 - Fails on API < 31 due to sync vs async MediaCodec behavior differences in
+// Robolectric.
+@Config(minSdk = 31)
+@Ignore("Flaky: b/491840995")
 @RunWith(RobolectricTestParameterInjector.class)
 public final class ClippingProgressivePlaybackTest {
 
@@ -74,6 +80,7 @@ public final class ClippingProgressivePlaybackTest {
     Pair<ExoPlayer, PlaybackOutput> setupData = setUpPlayerAndCapturingOutputForClippingTest();
     ExoPlayer player = setupData.first;
     PlaybackOutput playbackOutput = setupData.second;
+    String dumpFileSuffix = enableMediaPeriodClipping ? "enabled" : "disabled";
 
     player.setMediaItem(
         new MediaItem.Builder()
@@ -93,7 +100,7 @@ public final class ClippingProgressivePlaybackTest {
     DumpFileAsserts.assertOutput(
         ApplicationProvider.getApplicationContext(),
         playbackOutput,
-        "playbackdumps/clipping/clipped.dump");
+        "playbackdumps/clipping/clipped_period_clipping_" + dumpFileSuffix + ".dump");
   }
 
   @Test
@@ -101,6 +108,7 @@ public final class ClippingProgressivePlaybackTest {
     Pair<ExoPlayer, PlaybackOutput> setupData = setUpPlayerAndCapturingOutputForClippingTest();
     ExoPlayer player = setupData.first;
     PlaybackOutput playbackOutput = setupData.second;
+    String dumpFileSuffix = enableMediaPeriodClipping ? "enabled" : "disabled";
 
     player.setMediaItem(
         new MediaItem.Builder()
@@ -122,7 +130,7 @@ public final class ClippingProgressivePlaybackTest {
     DumpFileAsserts.assertOutput(
         ApplicationProvider.getApplicationContext(),
         playbackOutput,
-        "playbackdumps/clipping/clipped_seek.dump");
+        "playbackdumps/clipping/clipped_seek_period_clipping_" + dumpFileSuffix + ".dump");
   }
 
   private Pair<ExoPlayer, PlaybackOutput> setUpPlayerAndCapturingOutputForClippingTest() {

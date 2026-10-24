@@ -25,6 +25,7 @@ import androidx.media3.common.C;
 import androidx.media3.common.ColorInfo;
 import androidx.media3.common.Format;
 import androidx.media3.decoder.DecoderInputBuffer;
+import androidx.media3.exoplayer.source.SampleStream;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
@@ -163,7 +164,12 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
 
   @Override
   protected void onDecoderInputReady(DecoderInputBuffer inputBuffer) {
-    if (inputBuffer.timeUs < getLastResetPositionUs()) {
+    long streamEndPositionUs = getStreamEndPositionUs();
+    boolean exceedsStrictDuration =
+        ((checkNotNull(getStream()).getFlags() & SampleStream.FLAG_STRICT_DURATION) != 0)
+            && streamEndPositionUs != C.TIME_UNSET
+            && (inputBuffer.timeUs - getStreamOffsetUs()) >= streamEndPositionUs;
+    if (inputBuffer.timeUs < getLastResetPositionUs() || exceedsStrictDuration) {
       decodeOnlyPresentationTimestamps.add(inputBuffer.timeUs);
     }
   }

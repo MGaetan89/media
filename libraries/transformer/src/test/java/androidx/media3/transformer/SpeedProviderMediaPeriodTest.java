@@ -15,6 +15,7 @@
  */
 package androidx.media3.transformer;
 
+import static androidx.media3.exoplayer.source.SampleStream.FLAG_HAS_PREROLL;
 import static androidx.media3.exoplayer.source.SampleStream.FLAG_REQUIRE_FORMAT;
 import static androidx.media3.test.utils.FakeSampleStream.FakeSampleStreamItem.END_OF_STREAM_ITEM;
 import static androidx.media3.test.utils.FakeSampleStream.FakeSampleStreamItem.oneByteSample;
@@ -54,6 +55,7 @@ import androidx.media3.exoplayer.source.SinglePeriodTimeline;
 import androidx.media3.exoplayer.source.TrackGroupArray;
 import androidx.media3.exoplayer.trackselection.ExoTrackSelection;
 import androidx.media3.exoplayer.trackselection.FixedTrackSelection;
+import androidx.media3.exoplayer.upstream.BandwidthMeter;
 import androidx.media3.exoplayer.upstream.DefaultAllocator;
 import androidx.media3.test.utils.FakeMediaPeriod;
 import androidx.media3.test.utils.FakeMediaSource;
@@ -258,8 +260,11 @@ public final class SpeedProviderMediaPeriodTest {
         new SpeedProviderMediaPeriod(
             spyPeriod, new SpeedProviderMapper(SPEED_PROVIDER), clipStartUs);
     prepareMediaPeriodSync(speedProviderMediaPeriod, /* positionUs= */ 500_000 + clipStartUs);
+    SampleStream sampleStream =
+        selectTracksOnMediaPeriodAndTriggerLoading(speedProviderMediaPeriod);
 
     assertThat(speedProviderMediaPeriod.readDiscontinuity()).isEqualTo(2_000_000 + clipStartUs);
+    assertThat(sampleStream.getFlags()).isEqualTo(FLAG_HAS_PREROLL);
     verify(spyPeriod).readDiscontinuity();
   }
 
@@ -276,8 +281,11 @@ public final class SpeedProviderMediaPeriodTest {
         new SpeedProviderMediaPeriod(
             spyPeriod, new SpeedProviderMapper(SPEED_PROVIDER), clipStartUs);
     prepareMediaPeriodSync(speedProviderMediaPeriod, /* positionUs= */ 500_000 + clipStartUs);
+    SampleStream sampleStream =
+        selectTracksOnMediaPeriodAndTriggerLoading(speedProviderMediaPeriod);
 
     assertThat(speedProviderMediaPeriod.readDiscontinuity()).isEqualTo(C.TIME_UNSET);
+    assertThat(sampleStream.getFlags()).isEqualTo(0);
     verify(spyPeriod).readDiscontinuity();
   }
 
@@ -421,8 +429,8 @@ public final class SpeedProviderMediaPeriodTest {
           adjustedTimeline.set(timeline);
           latch.open();
         },
-        /* mediaTransferListener= */ null,
-        PlayerId.UNSET);
+        PlayerId.UNSET,
+        BandwidthMeter.NO_OP);
     latch.block(1000);
 
     Window adjustedWindow = adjustedTimeline.get().getWindow(0, new Window());
@@ -460,8 +468,8 @@ public final class SpeedProviderMediaPeriodTest {
           adjustedTimeline.set(timeline);
           latch.open();
         },
-        /* mediaTransferListener= */ null,
-        PlayerId.UNSET);
+        PlayerId.UNSET,
+        BandwidthMeter.NO_OP);
     assertThat(latch.block(1000)).isTrue();
 
     assertThat(adjustedTimeline.get().getWindow(0, new Window()).durationUs).isEqualTo(3_000_000);

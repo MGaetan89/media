@@ -35,8 +35,8 @@ import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.ColorSpace;
+import android.graphics.Gainmap;
 import androidx.media3.common.MediaItem;
-import androidx.media3.exoplayer.mediacodec.MediaCodecSelector;
 import androidx.media3.inspector.frame.FrameExtractor;
 import androidx.test.core.app.ApplicationProvider;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
@@ -63,6 +63,13 @@ public class FrameExtractorHdrTest {
   // extracted frame in seconds and milliseconds (_0.000 for 0s ; _1.567 for 1.567 seconds).
   private static final String GOLDEN_ASSET_FOLDER_PATH =
       "test-generated-goldens/FrameExtractorTest/";
+  // This file is used to verify the UltraHDR pipeline and is generated as follows:
+  // 1. Extract SDR frame using our frame extractor.
+  // 2. Extract HDR frame using ffmpeg from the test video.
+  // 3. Generate UltraHDR frame using libultrahdr's ultrahdr_app as a JPEG (UltraHDR is standardized
+  //    as a JPEG extension embedding the gainmap inside Multi-Picture Format metadata segments).
+  private static final String ULTRA_HDR_JPG_ASSET_PATH =
+      GOLDEN_ASSET_FOLDER_PATH + "ultra_hdr-color-test_0.000.jpg";
   private static final long TIMEOUT_SECONDS = 10;
   private static final float PSNR_THRESHOLD = 25f;
 
@@ -119,6 +126,67 @@ public class FrameExtractorHdrTest {
       assertThat(actualBitmap.getConfig()).isAnyOf(RGBA_1010102, RGBA_F16);
       assertThat(actualBitmap.getColorSpace()).isEqualTo(ColorSpace.get(BT2020_HLG));
       assertBitmapsAreSimilar(expectedBitmap, actualBitmap, PSNR_THRESHOLD);
+    }
+  }
+
+  @Test
+  @SdkSuppress(minSdkVersion = 34) // UltraHDR Bitmaps are only supported on API 34+.
+  public void extractFrame_oneFrameHlgWithUltraHdrOutput_returnsExpectedUltraHdrFrame()
+      throws Exception {
+    // TODO: b/438478509 - rename assumeDeviceSupportsOpenGlToneMapping.
+    assumeDeviceSupportsOpenGlToneMapping(testId, MP4_ASSET_COLOR_TEST_1080P_HLG10.videoFormat);
+    assumeDeviceSupportsHdrColorTransfer(testId, MP4_ASSET_COLOR_TEST_1080P_HLG10.videoFormat);
+    try (FrameExtractor frameExtractor =
+        new FrameExtractor.Builder(context, MediaItem.fromUri(MP4_ASSET_COLOR_TEST_1080P_HLG10.uri))
+            .setEnableUltraHdr(true)
+            .build()) {
+
+      ListenableFuture<FrameExtractor.Frame> frameFuture =
+          frameExtractor.getFrame(/* positionMs= */ 0);
+      FrameExtractor.Frame frame = frameFuture.get(TIMEOUT_SECONDS, SECONDS);
+      Bitmap actualBitmap = frame.bitmap;
+      Bitmap expectedBitmap = readBitmap(ULTRA_HDR_JPG_ASSET_PATH);
+      Bitmap expectedToneMappedBitmap = readBitmap(TONE_MAP_HLG_TO_SDR_PNG_ASSET_PATH);
+      maybeSaveTestBitmap(
+          testId, /* bitmapLabel= */ "actualBitmap", actualBitmap, /* path= */ null);
+
+      assertThat(frame.presentationTimeMs).isEqualTo(0);
+      assertThat(actualBitmap.getConfig()).isEqualTo(Bitmap.Config.ARGB_8888);
+      assertThat(actualBitmap.hasGainmap()).isTrue();
+      assertThat(expectedBitmap.hasGainmap()).isTrue();
+
+      // Compare SDR base
+      assertBitmapsAreSimilar(expectedBitmap, actualBitmap, PSNR_THRESHOLD);
+      assertBitmapsAreSimilar(expectedToneMappedBitmap, actualBitmap, PSNR_THRESHOLD);
+
+      // Compare Gainmap metadata
+      Gainmap actualGainmap = actualBitmap.getGainmap();
+      assertThat(actualGainmap).isNotNull();
+      Gainmap expectedGainmap = expectedBitmap.getGainmap();
+      assertThat(expectedGainmap).isNotNull();
+      float metadataTolerance = 0.01f;
+      for (int i = 0; i < 3; i++) {
+        assertThat(actualGainmap.getRatioMin()[i])
+            .isWithin(metadataTolerance)
+            .of(expectedGainmap.getRatioMin()[i]);
+        assertThat(actualGainmap.getRatioMax()[i])
+            .isWithin(metadataTolerance)
+            .of(expectedGainmap.getRatioMax()[i]);
+        assertThat(actualGainmap.getGamma()[i])
+            .isWithin(metadataTolerance)
+            .of(expectedGainmap.getGamma()[i]);
+      }
+      assertThat(actualGainmap.getDisplayRatioForFullHdr())
+          .isWithin(metadataTolerance)
+          .of(expectedGainmap.getDisplayRatioForFullHdr());
+      assertThat(actualGainmap.getMinDisplayRatioForHdrTransition())
+          .isWithin(metadataTolerance)
+          .of(expectedGainmap.getMinDisplayRatioForHdrTransition());
+
+      // Compare Gainmap contents
+      Bitmap actualGainmapBitmap = actualGainmap.getGainmapContents();
+      Bitmap expectedGainmapBitmap = expectedGainmap.getGainmapContents();
+      assertBitmapsAreSimilar(expectedGainmapBitmap, actualGainmapBitmap, PSNR_THRESHOLD);
     }
   }
 
@@ -185,21 +253,21 @@ public class FrameExtractorHdrTest {
     assumeDeviceSupportsOpenGlToneMapping(testId, MP4_ASSET_COLOR_TEST_1080P_HLG10.videoFormat);
 
     FrameExtractor.Frame frameFirstItem;
+    FrameExtractor.Frame frameSecondItem;
     try (FrameExtractor frameExtractor =
         new FrameExtractor.Builder(context, MediaItem.fromUri(MP4_ASSET_COLOR_TEST_1080P_HLG10.uri))
             .build()) {
       ListenableFuture<FrameExtractor.Frame> frameFutureFirstItem =
           frameExtractor.getFrame(/* positionMs= */ 0);
       frameFirstItem = frameFutureFirstItem.get(TIMEOUT_SECONDS, SECONDS);
-    }
 
-    FrameExtractor.Frame frameSecondItem;
-    try (FrameExtractor frameExtractor =
-        new FrameExtractor.Builder(context, MediaItem.fromUri(MP4_TRIM_OPTIMIZATION_270.uri))
-            .build()) {
-      ListenableFuture<FrameExtractor.Frame> frameFutureSecondItem =
-          frameExtractor.getFrame(/* positionMs= */ 0);
-      frameSecondItem = frameFutureSecondItem.get(TIMEOUT_SECONDS, SECONDS);
+      try (FrameExtractor nestedFrameExtractor =
+          new FrameExtractor.Builder(context, MediaItem.fromUri(MP4_TRIM_OPTIMIZATION_270.uri))
+              .build()) {
+        ListenableFuture<FrameExtractor.Frame> frameFutureSecondItem =
+            nestedFrameExtractor.getFrame(/* positionMs= */ 0);
+        frameSecondItem = frameFutureSecondItem.get(TIMEOUT_SECONDS, SECONDS);
+      }
     }
 
     Bitmap actualBitmapFirstItem = frameFirstItem.bitmap;
@@ -228,25 +296,55 @@ public class FrameExtractorHdrTest {
     assumeDeviceSupportsOpenGlToneMapping(testId, MP4_ASSET_COLOR_TEST_1080P_HLG10.videoFormat);
 
     FrameExtractor.Frame frameFirstItem;
+    FrameExtractor.Frame frameSecondItem;
     try (FrameExtractor frameExtractor =
         new FrameExtractor.Builder(context, MediaItem.fromUri(MP4_ASSET_COLOR_TEST_1080P_HLG10.uri))
-            .setMediaCodecSelector(MediaCodecSelector.DEFAULT)
             .setExtractHdrFrames(true)
             .build()) {
       ListenableFuture<FrameExtractor.Frame> frameFutureFirstItem =
           frameExtractor.getFrame(/* positionMs= */ 0);
       frameFirstItem = frameFutureFirstItem.get(TIMEOUT_SECONDS, SECONDS);
+
+      try (FrameExtractor nestedFrameExtractor =
+          new FrameExtractor.Builder(context, MediaItem.fromUri(MP4_TRIM_OPTIMIZATION_270.uri))
+              .setExtractHdrFrames(true)
+              .build()) {
+        ListenableFuture<FrameExtractor.Frame> frameFutureSecondItem =
+            nestedFrameExtractor.getFrame(/* positionMs= */ 0);
+        frameSecondItem = frameFutureSecondItem.get(TIMEOUT_SECONDS, SECONDS);
+      }
     }
 
+    assertThat(frameFirstItem.presentationTimeMs).isEqualTo(0);
+    assertThat(frameSecondItem.presentationTimeMs).isEqualTo(0);
+  }
+
+  @Test
+  @SdkSuppress(minSdkVersion = 34) // HLG Bitmaps are only supported on API 34+.
+  public void extractFrame_ultraHdr_changeMediaItemFromHdrToSdrWithHdrOutput_succeeds()
+      throws Exception {
+    // TODO: b/438478509 - rename assumeDeviceSupportsOpenGlToneMapping. This check verifies
+    // that HDR input can be sampled by the GL pipeline.
+    assumeDeviceSupportsOpenGlToneMapping(testId, MP4_ASSET_COLOR_TEST_1080P_HLG10.videoFormat);
+
+    FrameExtractor.Frame frameFirstItem;
     FrameExtractor.Frame frameSecondItem;
     try (FrameExtractor frameExtractor =
-        new FrameExtractor.Builder(context, MediaItem.fromUri(MP4_TRIM_OPTIMIZATION_270.uri))
-            .setMediaCodecSelector(MediaCodecSelector.DEFAULT)
-            .setExtractHdrFrames(true)
+        new FrameExtractor.Builder(context, MediaItem.fromUri(MP4_ASSET_COLOR_TEST_1080P_HLG10.uri))
+            .setEnableUltraHdr(true)
             .build()) {
-      ListenableFuture<FrameExtractor.Frame> frameFutureSecondItem =
+      ListenableFuture<FrameExtractor.Frame> frameFutureFirstItem =
           frameExtractor.getFrame(/* positionMs= */ 0);
-      frameSecondItem = frameFutureSecondItem.get(TIMEOUT_SECONDS, SECONDS);
+      frameFirstItem = frameFutureFirstItem.get(TIMEOUT_SECONDS, SECONDS);
+
+      try (FrameExtractor nestedFrameExtractor =
+          new FrameExtractor.Builder(context, MediaItem.fromUri(MP4_TRIM_OPTIMIZATION_270.uri))
+              .setEnableUltraHdr(true)
+              .build()) {
+        ListenableFuture<FrameExtractor.Frame> frameFutureSecondItem =
+            nestedFrameExtractor.getFrame(/* positionMs= */ 0);
+        frameSecondItem = frameFutureSecondItem.get(TIMEOUT_SECONDS, SECONDS);
+      }
     }
 
     assertThat(frameFirstItem.presentationTimeMs).isEqualTo(0);

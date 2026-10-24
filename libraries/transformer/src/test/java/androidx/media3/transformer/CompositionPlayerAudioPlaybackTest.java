@@ -16,9 +16,11 @@
 package androidx.media3.transformer;
 
 import static androidx.media3.common.C.TRACK_TYPE_AUDIO;
+import static androidx.media3.common.Player.DISCONTINUITY_REASON_AUTO_TRANSITION;
 import static androidx.media3.common.Player.STATE_READY;
 import static androidx.media3.test.utils.AssetInfo.WAV_24LE_PCM_ASSET;
 import static androidx.media3.test.utils.AssetInfo.WAV_32LE_PCM_ASSET;
+import static androidx.media3.test.utils.AssetInfo.WAV_96KHZ_ASSET;
 import static androidx.media3.test.utils.AssetInfo.WAV_ASSET;
 import static androidx.media3.test.utils.TestUtil.createByteCountingAudioProcessor;
 import static androidx.media3.test.utils.robolectric.TestPlayerRunHelper.advance;
@@ -33,6 +35,7 @@ import static androidx.media3.transformer.TestUtil.createSampleRateChangingAudio
 import static androidx.media3.transformer.TestUtil.createTestCompositionPlayer;
 import static androidx.media3.transformer.TestUtil.createVolumeScalingAudioProcessor;
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.collect.Iterables.getLast;
 import static com.google.common.truth.Truth.assertThat;
 
 import android.content.Context;
@@ -47,30 +50,32 @@ import androidx.media3.test.utils.CapturingAudioSink;
 import androidx.media3.test.utils.DumpFileAsserts;
 import androidx.media3.test.utils.FakeClock;
 import androidx.media3.test.utils.PassthroughAudioProcessor;
-import androidx.media3.test.utils.robolectric.TestPlayerRunHelper;
 import androidx.media3.transformer.TestUtil.FormatCapturingAudioProcessor;
 import androidx.test.core.app.ApplicationProvider;
-import androidx.test.ext.junit.runners.AndroidJUnit4;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
-import java.io.IOException;
+import com.google.common.truth.Expect;
+import com.google.testing.junit.testparameterinjector.TestParameter;
 import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.robolectric.RobolectricTestParameterInjector;
 
 /**
  * Audio playback unit tests for {@link CompositionPlayer}.
  *
  * <p>These tests focus on audio because the video pipeline doesn't work in Robolectric.
  */
-@RunWith(AndroidJUnit4.class)
+@RunWith(RobolectricTestParameterInjector.class)
 public final class CompositionPlayerAudioPlaybackTest {
+  @Rule public final Expect expect = Expect.create();
 
   private static final String PREVIEW_DUMP_FILE_EXTENSION = "audiosinkdumps/";
   private static final SpeedProvider SPEED_PROVIDER_2X =
@@ -107,15 +112,23 @@ public final class CompositionPlayerAudioPlaybackTest {
 
   private final Context context = ApplicationProvider.getApplicationContext();
   private CapturingAudioSink capturingAudioSink;
+  private CompositionPlayer player;
 
   @Before
   public void setUp() {
     capturingAudioSink = CapturingAudioSink.createForSampleCapturing();
   }
 
+  @After
+  public void tearDown() {
+    if (player != null) {
+      player.release();
+    }
+  }
+
   @Test
   public void playSingleSequence_outputsCorrectSamples() throws Exception {
-    CompositionPlayer player = createCompositionPlayer(context, capturingAudioSink);
+    player = createCompositionPlayer(context, capturingAudioSink);
     EditedMediaItem editedMediaItem1 =
         new EditedMediaItem.Builder(MediaItem.fromUri(ASSET_URI_PREFIX + FILE_AUDIO_RAW))
             .setDurationUs(1_000_000L)
@@ -131,9 +144,8 @@ public final class CompositionPlayerAudioPlaybackTest {
 
     player.setComposition(composition);
     player.prepare();
-    player.play();
-    advance(player).untilState(Player.STATE_ENDED);
-    player.release();
+
+    play(player).untilState(Player.STATE_ENDED);
 
     DumpFileAsserts.assertOutput(
         context,
@@ -143,7 +155,7 @@ public final class CompositionPlayerAudioPlaybackTest {
 
   @Test
   public void playSingleSequence_withItemEffects_outputsCorrectSamples() throws Exception {
-    CompositionPlayer player = createCompositionPlayer(context, capturingAudioSink);
+    player = createCompositionPlayer(context, capturingAudioSink);
     EditedMediaItem editedMediaItem1 =
         new EditedMediaItem.Builder(MediaItem.fromUri(ASSET_URI_PREFIX + FILE_AUDIO_RAW))
             .setDurationUs(1_000_000L)
@@ -161,9 +173,8 @@ public final class CompositionPlayerAudioPlaybackTest {
 
     player.setComposition(composition);
     player.prepare();
-    player.play();
-    advance(player).untilState(Player.STATE_ENDED);
-    player.release();
+
+    play(player).untilState(Player.STATE_ENDED);
 
     DumpFileAsserts.assertOutput(
         context,
@@ -175,7 +186,7 @@ public final class CompositionPlayerAudioPlaybackTest {
 
   @Test
   public void playSingleItem_withItemEffects_outputsCorrectSamples() throws Exception {
-    CompositionPlayer player = createCompositionPlayer(context, capturingAudioSink);
+    player = createCompositionPlayer(context, capturingAudioSink);
     EditedMediaItem audioEditedMediaItem =
         new EditedMediaItem.Builder(MediaItem.fromUri(ASSET_URI_PREFIX + FILE_AUDIO_RAW))
             .setRemoveVideo(true)
@@ -187,9 +198,8 @@ public final class CompositionPlayerAudioPlaybackTest {
 
     player.setComposition(composition);
     player.prepare();
-    player.play();
-    advance(player).untilState(Player.STATE_ENDED);
-    player.release();
+
+    play(player).untilState(Player.STATE_ENDED);
 
     DumpFileAsserts.assertOutput(
         context,
@@ -199,7 +209,7 @@ public final class CompositionPlayerAudioPlaybackTest {
 
   @Test
   public void playSingleItem_withCompositionEffects_outputsCorrectSamples() throws Exception {
-    CompositionPlayer player = createCompositionPlayer(context, capturingAudioSink);
+    player = createCompositionPlayer(context, capturingAudioSink);
     EditedMediaItem audioEditedMediaItem =
         new EditedMediaItem.Builder(MediaItem.fromUri(ASSET_URI_PREFIX + FILE_AUDIO_RAW))
             .setRemoveVideo(true)
@@ -212,9 +222,8 @@ public final class CompositionPlayerAudioPlaybackTest {
 
     player.setComposition(composition);
     player.prepare();
-    player.play();
-    advance(player).untilState(Player.STATE_ENDED);
-    player.release();
+
+    play(player).untilState(Player.STATE_ENDED);
 
     DumpFileAsserts.assertOutput(
         context,
@@ -224,7 +233,7 @@ public final class CompositionPlayerAudioPlaybackTest {
 
   @Test
   public void playSingleSequence_withClipping_outputsCorrectSamples() throws Exception {
-    CompositionPlayer player = createCompositionPlayer(context, capturingAudioSink);
+    player = createCompositionPlayer(context, capturingAudioSink);
     MediaItem mediaItem1 =
         new MediaItem.Builder()
             .setUri(ASSET_URI_PREFIX + FILE_AUDIO_RAW)
@@ -253,9 +262,8 @@ public final class CompositionPlayerAudioPlaybackTest {
 
     player.setComposition(composition);
     player.prepare();
-    player.play();
-    advance(player).untilState(Player.STATE_ENDED);
-    player.release();
+
+    play(player).untilState(Player.STATE_ENDED);
 
     DumpFileAsserts.assertOutput(
         context,
@@ -268,7 +276,7 @@ public final class CompositionPlayerAudioPlaybackTest {
   @Test
   public void playMultipleSequences_withClippingAndEffects_outputsCorrectSamples()
       throws Exception {
-    CompositionPlayer player = createCompositionPlayer(context, capturingAudioSink);
+    player = createCompositionPlayer(context, capturingAudioSink);
     EditedMediaItem editedMediaItem1 =
         new EditedMediaItem.Builder(
                 new MediaItem.Builder()
@@ -297,10 +305,8 @@ public final class CompositionPlayerAudioPlaybackTest {
             .build();
     player.setComposition(composition);
     player.prepare();
-    player.play();
 
-    TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
-    player.release();
+    play(player).untilState(Player.STATE_ENDED);
 
     DumpFileAsserts.assertOutput(
         context,
@@ -310,7 +316,7 @@ public final class CompositionPlayerAudioPlaybackTest {
 
   @Test
   public void playSingleItem_withRepeatModeEnabled_outputsCorrectSamples() throws Exception {
-    CompositionPlayer player = createCompositionPlayer(context, capturingAudioSink);
+    player = createCompositionPlayer(context, capturingAudioSink);
     player.setRepeatMode(Player.REPEAT_MODE_ALL);
     EditedMediaItem editedMediaItem =
         new EditedMediaItem.Builder(MediaItem.fromUri(ASSET_URI_PREFIX + FILE_AUDIO_RAW))
@@ -322,11 +328,9 @@ public final class CompositionPlayerAudioPlaybackTest {
     player.prepare();
     player.play();
 
-    TestPlayerRunHelper.runUntilPositionDiscontinuity(
-        player, Player.DISCONTINUITY_REASON_AUTO_TRANSITION);
+    advance(player).untilPositionDiscontinuityWithReason(DISCONTINUITY_REASON_AUTO_TRANSITION);
     player.setRepeatMode(Player.REPEAT_MODE_OFF);
-    TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
-    player.release();
+    advance(player).untilState(Player.STATE_ENDED);
 
     DumpFileAsserts.assertOutput(
         context,
@@ -337,7 +341,7 @@ public final class CompositionPlayerAudioPlaybackTest {
   @Test
   public void playMultipleSequences_withShortLoopingSequence_outputsCorrectSamples()
       throws Exception {
-    CompositionPlayer player = createCompositionPlayer(context, capturingAudioSink);
+    player = createCompositionPlayer(context, capturingAudioSink);
     EditedMediaItemSequence primarySequence =
         withAudioFrom(
             ImmutableList.of(
@@ -356,9 +360,8 @@ public final class CompositionPlayerAudioPlaybackTest {
     Composition composition = new Composition.Builder(primarySequence, loopingSequence).build();
     player.setComposition(composition);
     player.prepare();
-    player.play();
-    TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
-    player.release();
+
+    play(player).untilState(Player.STATE_ENDED);
 
     DumpFileAsserts.assertOutput(
         context,
@@ -370,7 +373,7 @@ public final class CompositionPlayerAudioPlaybackTest {
   @Test
   public void playMultipleSequences_withLongLoopingSequence_outputsCorrectSamples()
       throws Exception {
-    CompositionPlayer player = createCompositionPlayer(context, capturingAudioSink);
+    player = createCompositionPlayer(context, capturingAudioSink);
     EditedMediaItemSequence primarySequence =
         withAudioFrom(
             ImmutableList.of(
@@ -389,9 +392,8 @@ public final class CompositionPlayerAudioPlaybackTest {
     Composition composition = new Composition.Builder(primarySequence, loopingSequence).build();
     player.setComposition(composition);
     player.prepare();
-    player.play();
-    TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
-    player.release();
+
+    play(player).untilState(Player.STATE_ENDED);
 
     DumpFileAsserts.assertOutput(
         context,
@@ -402,7 +404,7 @@ public final class CompositionPlayerAudioPlaybackTest {
 
   @Test
   public void playTwoSequences_withLongLoopingSequence_hasNonLoopingSequenceDuration() {
-    CompositionPlayer player = createCompositionPlayer(context, capturingAudioSink);
+    player = createCompositionPlayer(context, capturingAudioSink);
     EditedMediaItemSequence primarySequence =
         withAudioFrom(
             ImmutableList.of(
@@ -426,9 +428,8 @@ public final class CompositionPlayerAudioPlaybackTest {
   }
 
   @Test
-  public void play_audioSequenceWithMiddleGap_outputsCorrectSamples()
-      throws TimeoutException, IOException {
-    CompositionPlayer player = createCompositionPlayer(context, capturingAudioSink);
+  public void play_audioSequenceWithMiddleGap_outputsCorrectSamples() throws Exception {
+    player = createCompositionPlayer(context, capturingAudioSink);
     EditedMediaItem clip =
         new EditedMediaItem.Builder(MediaItem.fromUri(ASSET_URI_PREFIX + FILE_AUDIO_RAW))
             .setDurationUs(1_000_000L)
@@ -444,9 +445,7 @@ public final class CompositionPlayerAudioPlaybackTest {
     player.prepare();
     checkState(player.getDuration() == 2_500L);
 
-    player.play();
-    TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
-    player.release();
+    play(player).untilState(Player.STATE_ENDED);
 
     DumpFileAsserts.assertOutput(
         context,
@@ -456,9 +455,8 @@ public final class CompositionPlayerAudioPlaybackTest {
   }
 
   @Test
-  public void play_audioSequenceWithStartGap_outputsCorrectSamples()
-      throws TimeoutException, IOException {
-    CompositionPlayer player = createCompositionPlayer(context, capturingAudioSink);
+  public void play_audioSequenceWithStartGap_outputsCorrectSamples() throws Exception {
+    player = createCompositionPlayer(context, capturingAudioSink);
     EditedMediaItem clip =
         new EditedMediaItem.Builder(MediaItem.fromUri(ASSET_URI_PREFIX + FILE_AUDIO_RAW))
             .setDurationUs(1_000_000L)
@@ -473,9 +471,7 @@ public final class CompositionPlayerAudioPlaybackTest {
     player.prepare();
     checkState(player.getDuration() == 1_500L);
 
-    player.play();
-    TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
-    player.release();
+    play(player).untilState(Player.STATE_ENDED);
 
     DumpFileAsserts.assertOutput(
         context,
@@ -486,7 +482,7 @@ public final class CompositionPlayerAudioPlaybackTest {
 
   @Test
   public void playSingleSequence_withRepeatModeEnabled_outputsCorrectSamples() throws Exception {
-    CompositionPlayer player = createCompositionPlayer(context, capturingAudioSink);
+    player = createCompositionPlayer(context, capturingAudioSink);
     player.setRepeatMode(Player.REPEAT_MODE_ALL);
     EditedMediaItem editedMediaItem1 =
         new EditedMediaItem.Builder(MediaItem.fromUri(ASSET_URI_PREFIX + FILE_AUDIO_RAW))
@@ -504,12 +500,10 @@ public final class CompositionPlayerAudioPlaybackTest {
     player.prepare();
     player.play();
 
-    TestPlayerRunHelper.runUntilPositionDiscontinuity(
-        player, Player.DISCONTINUITY_REASON_AUTO_TRANSITION);
+    advance(player).untilPositionDiscontinuityWithReason(DISCONTINUITY_REASON_AUTO_TRANSITION);
 
     player.setRepeatMode(Player.REPEAT_MODE_OFF);
-    TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
-    player.release();
+    play(player).untilState(Player.STATE_ENDED);
 
     DumpFileAsserts.assertOutput(
         context,
@@ -520,7 +514,7 @@ public final class CompositionPlayerAudioPlaybackTest {
   @Test
   public void playSingleSequence_withMiddleItemAudioRemoved_outputsCorrectSamples()
       throws Exception {
-    CompositionPlayer player = createCompositionPlayer(context, capturingAudioSink);
+    player = createCompositionPlayer(context, capturingAudioSink);
     EditedMediaItem editedMediaItem =
         new EditedMediaItem.Builder(MediaItem.fromUri(ASSET_URI_PREFIX + FILE_AUDIO_RAW))
             .setDurationUs(1_000_000L)
@@ -534,10 +528,8 @@ public final class CompositionPlayerAudioPlaybackTest {
             .build();
     player.setComposition(composition);
     player.prepare();
-    player.play();
 
-    TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
-    player.release();
+    play(player).untilState(Player.STATE_ENDED);
 
     // The silence should be in between the timestamp between [1, 2] seconds.
     DumpFileAsserts.assertOutput(
@@ -550,7 +542,7 @@ public final class CompositionPlayerAudioPlaybackTest {
   @Test
   public void playSingleSequence_withFirstAndLastItemAudioRemoved_outputsCorrectSamples()
       throws Exception {
-    CompositionPlayer player = createCompositionPlayer(context, capturingAudioSink);
+    player = createCompositionPlayer(context, capturingAudioSink);
     EditedMediaItem editedMediaItem =
         new EditedMediaItem.Builder(MediaItem.fromUri(ASSET_URI_PREFIX + FILE_AUDIO_RAW))
             .setDurationUs(1_000_000L)
@@ -565,10 +557,8 @@ public final class CompositionPlayerAudioPlaybackTest {
             .build();
     player.setComposition(composition);
     player.prepare();
-    player.play();
 
-    TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
-    player.release();
+    play(player).untilState(Player.STATE_ENDED);
 
     // The silence should be in between the timestamp between [0, 1] and [2, 3] seconds.
     DumpFileAsserts.assertOutput(
@@ -580,7 +570,7 @@ public final class CompositionPlayerAudioPlaybackTest {
 
   @Test
   public void playMultipleSequences_withRepeatModeEnabled_outputsCorrectSamples() throws Exception {
-    CompositionPlayer player = createCompositionPlayer(context, capturingAudioSink);
+    player = createCompositionPlayer(context, capturingAudioSink);
     player.setRepeatMode(Player.REPEAT_MODE_ALL);
     EditedMediaItem editedMediaItem1 =
         new EditedMediaItem.Builder(
@@ -608,12 +598,10 @@ public final class CompositionPlayerAudioPlaybackTest {
     player.prepare();
     player.play();
 
-    TestPlayerRunHelper.runUntilPositionDiscontinuity(
-        player, Player.DISCONTINUITY_REASON_AUTO_TRANSITION);
+    advance(player).untilPositionDiscontinuityWithReason(DISCONTINUITY_REASON_AUTO_TRANSITION);
 
     player.setRepeatMode(Player.REPEAT_MODE_OFF);
-    TestPlayerRunHelper.runUntilPlaybackState(player, Player.STATE_ENDED);
-    player.release();
+    advance(player).untilState(Player.STATE_ENDED);
 
     DumpFileAsserts.assertOutput(
         context,
@@ -640,7 +628,7 @@ public final class CompositionPlayerAudioPlaybackTest {
         new Composition.Builder(
                 EditedMediaItemSequence.withAudioFrom(ImmutableList.of(firstItem, secondItem)))
             .build();
-    CompositionPlayer player = createTestCompositionPlayer();
+    player = createTestCompositionPlayer();
 
     player.setComposition(composition);
     player.prepare();
@@ -658,8 +646,184 @@ public final class CompositionPlayerAudioPlaybackTest {
   }
 
   @Test
+  public void seekTo_fromFirstItemPastEndOfSequence_doesNotHang() throws Exception {
+    player = createCompositionPlayer(context, capturingAudioSink);
+    EditedMediaItem item =
+        new EditedMediaItem.Builder(MediaItem.fromUri(WAV_ASSET.uri))
+            .setDurationUs(WAV_ASSET.audioDurationUs)
+            .build();
+
+    EditedMediaItemSequence sequence = withAudioFrom(ImmutableList.of(item, item));
+    Composition composition = new Composition.Builder(sequence).build();
+    player.setComposition(composition);
+    player.prepare();
+
+    // Do not play because all audio buffers will be immediately queued to AudioGraphInput and
+    // trigger transition.
+    advance(player).untilState(STATE_READY);
+
+    player.seekTo(5_000);
+    play(player).untilState(Player.STATE_ENDED);
+  }
+
+  @Test
+  public void seekTo_fromFirstItemToItemBoundary_doesNotHang() throws Exception {
+    player = createCompositionPlayer(context, capturingAudioSink);
+    EditedMediaItem item =
+        new EditedMediaItem.Builder(MediaItem.fromUri(WAV_ASSET.uri))
+            .setDurationUs(WAV_ASSET.audioDurationUs)
+            .build();
+
+    EditedMediaItemSequence sequence = withAudioFrom(ImmutableList.of(item, item));
+    Composition composition = new Composition.Builder(sequence).build();
+    player.setComposition(composition);
+    player.prepare();
+
+    // Do not play because all audio buffers will be immediately queued to AudioGraphInput and
+    // trigger transition.
+    advance(player).untilState(STATE_READY);
+
+    player.seekTo(1_000);
+    play(player).untilState(Player.STATE_ENDED);
+  }
+
+  @Test
+  public void seekTo_withinFirstItemWithFormatMatchingSequence_doesNotHang() throws Exception {
+    player = createCompositionPlayer(context, capturingAudioSink);
+    EditedMediaItem item =
+        new EditedMediaItem.Builder(MediaItem.fromUri(WAV_ASSET.uri))
+            .setDurationUs(WAV_ASSET.audioDurationUs)
+            .build();
+    EditedMediaItemSequence sequence = withAudioFrom(ImmutableList.of(item, item));
+    Composition composition = new Composition.Builder(sequence).build();
+    player.setComposition(composition);
+    player.prepare();
+    // Do not play because all audio buffers will be immediately queued to AudioGraphInput and
+    // trigger transition.
+    advance(player).untilState(STATE_READY);
+
+    player.seekTo(400);
+
+    play(player).untilState(Player.STATE_ENDED);
+  }
+
+  @Test
+  public void seekTo_toSecondFormatMatchingItem_doesNotHang() throws Exception {
+    player = createCompositionPlayer(context, capturingAudioSink);
+    EditedMediaItem item =
+        new EditedMediaItem.Builder(MediaItem.fromUri(WAV_ASSET.uri))
+            .setDurationUs(WAV_ASSET.audioDurationUs)
+            .build();
+    EditedMediaItemSequence sequence = withAudioFrom(ImmutableList.of(item, item));
+    Composition composition = new Composition.Builder(sequence).build();
+    player.setComposition(composition);
+    player.prepare();
+    // Do not play because all audio buffers will be immediately queued to AudioGraphInput and
+    // trigger transition.
+    advance(player).untilState(STATE_READY);
+
+    player.seekTo(1_200);
+
+    play(player).untilState(Player.STATE_ENDED);
+  }
+
+  @Test
+  public void seekTo_fromFirstItemPastEndOfSequenceOverDifferentFormatItem_doesNotHang()
+      throws Exception {
+    player = createCompositionPlayer(context, capturingAudioSink);
+    EditedMediaItem item =
+        new EditedMediaItem.Builder(MediaItem.fromUri(WAV_ASSET.uri))
+            .setDurationUs(WAV_ASSET.audioDurationUs)
+            .build();
+    EditedMediaItem item2 =
+        new EditedMediaItem.Builder(MediaItem.fromUri(WAV_96KHZ_ASSET.uri))
+            .setDurationUs(WAV_96KHZ_ASSET.audioDurationUs)
+            .build();
+    EditedMediaItemSequence sequence = withAudioFrom(ImmutableList.of(item, item2));
+    Composition composition = new Composition.Builder(sequence).build();
+    player.setComposition(composition);
+    player.prepare();
+    // Do not play because all audio buffers will be immediately queued to AudioGraphInput and
+    // trigger transition.
+    advance(player).untilState(STATE_READY);
+
+    player.seekTo(5_000);
+    play(player).untilState(Player.STATE_ENDED);
+  }
+
+  @Test
+  public void seekTo_fromFirstItemToItemBoundaryWithMismatchingFormats_doesNotHang()
+      throws Exception {
+    player = createCompositionPlayer(context, capturingAudioSink);
+    EditedMediaItem item =
+        new EditedMediaItem.Builder(MediaItem.fromUri(WAV_ASSET.uri))
+            .setDurationUs(WAV_ASSET.audioDurationUs)
+            .build();
+    EditedMediaItem item2 =
+        new EditedMediaItem.Builder(MediaItem.fromUri(WAV_96KHZ_ASSET.uri))
+            .setDurationUs(WAV_96KHZ_ASSET.audioDurationUs)
+            .build();
+    EditedMediaItemSequence sequence = withAudioFrom(ImmutableList.of(item, item2));
+    Composition composition = new Composition.Builder(sequence).build();
+    player.setComposition(composition);
+    player.prepare();
+    // Do not play because all audio buffers will be immediately queued to AudioGraphInput and
+    // trigger transition.
+    advance(player).untilState(STATE_READY);
+
+    player.seekTo(1_000);
+    play(player).untilState(Player.STATE_ENDED);
+  }
+
+  @Test
+  public void seekTo_withinFirstItemWithMismatchingFormatSequence_doesNotHang() throws Exception {
+    player = createCompositionPlayer(context, capturingAudioSink);
+    EditedMediaItem item =
+        new EditedMediaItem.Builder(MediaItem.fromUri(WAV_ASSET.uri))
+            .setDurationUs(WAV_ASSET.audioDurationUs)
+            .build();
+    EditedMediaItem item2 =
+        new EditedMediaItem.Builder(MediaItem.fromUri(WAV_96KHZ_ASSET.uri))
+            .setDurationUs(WAV_96KHZ_ASSET.audioDurationUs)
+            .build();
+    EditedMediaItemSequence sequence = withAudioFrom(ImmutableList.of(item, item2));
+    Composition composition = new Composition.Builder(sequence).build();
+    player.setComposition(composition);
+    player.prepare();
+    // Do not play because all audio buffers will be immediately queued to AudioGraphInput and
+    // trigger transition.
+    advance(player).untilState(STATE_READY);
+
+    player.seekTo(400);
+    play(player).untilState(Player.STATE_ENDED);
+  }
+
+  @Test
+  public void seekTo_toSecondItemWithMismatchingFormat_doesNotHang() throws Exception {
+    player = createCompositionPlayer(context, capturingAudioSink);
+    EditedMediaItem item =
+        new EditedMediaItem.Builder(MediaItem.fromUri(WAV_ASSET.uri))
+            .setDurationUs(WAV_ASSET.audioDurationUs)
+            .build();
+    EditedMediaItem item2 =
+        new EditedMediaItem.Builder(MediaItem.fromUri(WAV_96KHZ_ASSET.uri))
+            .setDurationUs(WAV_96KHZ_ASSET.audioDurationUs)
+            .build();
+    EditedMediaItemSequence sequence = withAudioFrom(ImmutableList.of(item, item2));
+    Composition composition = new Composition.Builder(sequence).build();
+    player.setComposition(composition);
+    player.prepare();
+    // Do not play because all audio buffers will be immediately queued to AudioGraphInput and
+    // trigger transition.
+    advance(player).untilState(STATE_READY);
+
+    player.seekTo(1_200);
+    play(player).untilState(Player.STATE_ENDED);
+  }
+
+  @Test
   public void seekTo_singleSequence_outputsCorrectSamples() throws Exception {
-    CompositionPlayer player = createCompositionPlayer(context, capturingAudioSink);
+    player = createCompositionPlayer(context, capturingAudioSink);
     EditedMediaItem editedMediaItem =
         new EditedMediaItem.Builder(MediaItem.fromUri(ASSET_URI_PREFIX + FILE_AUDIO_RAW))
             .setDurationUs(1_000_000L)
@@ -672,7 +836,6 @@ public final class CompositionPlayerAudioPlaybackTest {
     player.prepare();
     player.play();
     advance(player).untilState(Player.STATE_ENDED);
-    player.release();
 
     DumpFileAsserts.assertOutput(
         context,
@@ -682,7 +845,7 @@ public final class CompositionPlayerAudioPlaybackTest {
 
   @Test
   public void seekToNextMediaItem_singleSequence_outputsCorrectSamples() throws Exception {
-    CompositionPlayer player = createCompositionPlayer(context, capturingAudioSink);
+    player = createCompositionPlayer(context, capturingAudioSink);
     EditedMediaItem editedMediaItem1 =
         new EditedMediaItem.Builder(MediaItem.fromUri(ASSET_URI_PREFIX + FILE_AUDIO_RAW))
             .setDurationUs(1_000_000L)
@@ -701,7 +864,6 @@ public final class CompositionPlayerAudioPlaybackTest {
     player.prepare();
     player.play();
     advance(player).untilState(Player.STATE_ENDED);
-    player.release();
 
     DumpFileAsserts.assertOutput(
         context,
@@ -713,7 +875,7 @@ public final class CompositionPlayerAudioPlaybackTest {
 
   @Test
   public void seekToPreviousMediaItem_singleSequence_outputsCorrectSamples() throws Exception {
-    CompositionPlayer player = createCompositionPlayer(context, capturingAudioSink);
+    player = createCompositionPlayer(context, capturingAudioSink);
     EditedMediaItem editedMediaItem1 =
         new EditedMediaItem.Builder(MediaItem.fromUri(ASSET_URI_PREFIX + FILE_AUDIO_RAW))
             .setDurationUs(1_000_000L)
@@ -733,7 +895,6 @@ public final class CompositionPlayerAudioPlaybackTest {
     player.prepare();
     player.play();
     advance(player).untilState(Player.STATE_ENDED);
-    player.release();
 
     DumpFileAsserts.assertOutput(
         context,
@@ -743,7 +904,7 @@ public final class CompositionPlayerAudioPlaybackTest {
 
   @Test
   public void seekTo_singleSequenceWithClipping_outputsCorrectSamples() throws Exception {
-    CompositionPlayer player = createCompositionPlayer(context, capturingAudioSink);
+    player = createCompositionPlayer(context, capturingAudioSink);
     MediaItem mediaItem1 =
         new MediaItem.Builder()
             .setUri(ASSET_URI_PREFIX + FILE_AUDIO_RAW)
@@ -775,7 +936,6 @@ public final class CompositionPlayerAudioPlaybackTest {
     player.prepare();
     player.play();
     advance(player).untilState(Player.STATE_ENDED);
-    player.release();
 
     DumpFileAsserts.assertOutput(
         context,
@@ -787,7 +947,7 @@ public final class CompositionPlayerAudioPlaybackTest {
 
   @Test
   public void playSingleSequence_replayAfterEnd_outputCorrectSamples() throws Exception {
-    CompositionPlayer player = createCompositionPlayer(context, capturingAudioSink);
+    player = createCompositionPlayer(context, capturingAudioSink);
     EditedMediaItem editedMediaItem =
         new EditedMediaItem.Builder(MediaItem.fromUri(ASSET_URI_PREFIX + FILE_AUDIO_RAW))
             .setDurationUs(1_000_000L)
@@ -804,7 +964,6 @@ public final class CompositionPlayerAudioPlaybackTest {
     player.seekToDefaultPosition();
     player.play();
     advance(player).untilState(Player.STATE_ENDED);
-    player.release();
 
     DumpFileAsserts.assertOutput(
         context,
@@ -825,7 +984,7 @@ public final class CompositionPlayerAudioPlaybackTest {
                 super.queueInput(sourceId, sourceBuffer);
               }
             };
-    CompositionPlayer player =
+    player =
         new CompositionPlayer.Builder(context)
             .setClock(new FakeClock(/* isAutoAdvancing= */ true))
             .setAudioMixerFactory(forwardingAudioMixerFactory)
@@ -841,7 +1000,6 @@ public final class CompositionPlayerAudioPlaybackTest {
     player.prepare();
     player.play();
     advance(player).untilState(Player.STATE_ENDED);
-    player.release();
 
     // Expect 1 second of single-channel, 44_100Hz, 2 bytes per sample.
     assertThat(bytesMixed.get()).isEqualTo(88_200);
@@ -859,7 +1017,7 @@ public final class CompositionPlayerAudioPlaybackTest {
         new Composition.Builder(EditedMediaItemSequence.withAudioFrom(ImmutableList.of(item, item)))
             .build();
 
-    CompositionPlayer player = createTestCompositionPlayer();
+    player = createTestCompositionPlayer();
     player.setComposition(composition);
     player.prepare();
     play(player).untilState(Player.STATE_ENDED);
@@ -886,7 +1044,7 @@ public final class CompositionPlayerAudioPlaybackTest {
         new Composition.Builder(EditedMediaItemSequence.withAudioFrom(ImmutableList.of(item, item)))
             .build();
 
-    CompositionPlayer player = createTestCompositionPlayer();
+    player = createTestCompositionPlayer();
     player.setComposition(composition);
     player.prepare();
     play(player).untilState(Player.STATE_ENDED);
@@ -910,7 +1068,7 @@ public final class CompositionPlayerAudioPlaybackTest {
         new Composition.Builder(EditedMediaItemSequence.withAudioFrom(ImmutableList.of(item, item)))
             .build();
 
-    CompositionPlayer player = createTestCompositionPlayer();
+    player = createTestCompositionPlayer();
     player.setComposition(composition);
     player.prepare();
     play(player).untilState(Player.STATE_ENDED);
@@ -939,7 +1097,7 @@ public final class CompositionPlayerAudioPlaybackTest {
         new Composition.Builder(EditedMediaItemSequence.withAudioFrom(ImmutableList.of(item, item)))
             .build();
 
-    CompositionPlayer player = createTestCompositionPlayer();
+    player = createTestCompositionPlayer();
     player.setComposition(composition);
     player.prepare();
     play(player).untilState(Player.STATE_ENDED);
@@ -961,7 +1119,7 @@ public final class CompositionPlayerAudioPlaybackTest {
         new Composition.Builder(EditedMediaItemSequence.withAudioFrom(ImmutableList.of(item, item)))
             .build();
 
-    CompositionPlayer player = createTestCompositionPlayer();
+    player = createTestCompositionPlayer();
     player.setComposition(composition);
     player.prepare();
     advance(player).untilState(STATE_READY);
@@ -994,7 +1152,7 @@ public final class CompositionPlayerAudioPlaybackTest {
         new Composition.Builder(EditedMediaItemSequence.withAudioFrom(ImmutableList.of(item)))
             .build();
 
-    CompositionPlayer player = createTestCompositionPlayer();
+    player = createTestCompositionPlayer();
     player.setComposition(composition);
     player.prepare();
     advance(player).untilState(STATE_READY);
@@ -1023,7 +1181,7 @@ public final class CompositionPlayerAudioPlaybackTest {
         new Composition.Builder(EditedMediaItemSequence.withAudioFrom(ImmutableList.of(item, item)))
             .build();
 
-    CompositionPlayer player = createTestCompositionPlayer();
+    player = createTestCompositionPlayer();
     player.setComposition(composition);
     player.prepare();
     player.seekTo(250);
@@ -1054,7 +1212,7 @@ public final class CompositionPlayerAudioPlaybackTest {
                 EditedMediaItemSequence.withAudioFrom(ImmutableList.of(normalSpeedItem, item)))
             .build();
 
-    CompositionPlayer player = createCompositionPlayer(context, capturingAudioSink);
+    player = createCompositionPlayer(context, capturingAudioSink);
     player.setComposition(composition);
     player.prepare();
     player.seekTo(/* positionMs= */ 1250);
@@ -1098,7 +1256,7 @@ public final class CompositionPlayerAudioPlaybackTest {
                 EditedMediaItemSequence.withAudioFrom(ImmutableList.of(normalSpeedItem, item)))
             .build();
 
-    CompositionPlayer player = createCompositionPlayer(context, capturingAudioSink);
+    player = createCompositionPlayer(context, capturingAudioSink);
     player.setComposition(composition);
     player.prepare();
     player.seekTo(/* positionMs= */ 1100);
@@ -1135,7 +1293,7 @@ public final class CompositionPlayerAudioPlaybackTest {
         new Composition.Builder(EditedMediaItemSequence.withAudioFrom(ImmutableList.of(item, item)))
             .build();
 
-    CompositionPlayer player = createTestCompositionPlayer();
+    player = createTestCompositionPlayer();
     player.setComposition(composition);
     player.prepare();
     player.seekTo(100);
@@ -1144,6 +1302,145 @@ public final class CompositionPlayerAudioPlaybackTest {
     // The audio pipeline calls an additional flush with a position offset of 0 before it knows the
     // actual position offset.
     assertThat(processor.positionOffsetsUs).containsExactly(0L, 100_000L, 0L).inOrder();
+  }
+
+  @Test
+  public void playUntilEnd_finalSinkIsEnded() throws Exception {
+    EditedMediaItem item =
+        new EditedMediaItem.Builder(MediaItem.fromUri(WAV_ASSET.uri))
+            .setDurationUs(1_000_000)
+            .build();
+    Composition composition =
+        new Composition.Builder(EditedMediaItemSequence.withAudioFrom(ImmutableList.of(item)))
+            .build();
+    player = createCompositionPlayer(context, capturingAudioSink);
+    player.setComposition(composition);
+    player.prepare();
+    player.play();
+    advance(player).untilState(Player.STATE_ENDED);
+    assertThat(capturingAudioSink.getCurrentPositionUs(true)).isAtLeast(1_000_000);
+    assertThat(capturingAudioSink.isEnded()).isTrue();
+  }
+
+  @Test
+  public void seekToMidClip_withSingleAudioClipSequence_reportsCorrectAudioProcessorPositionOffset(
+      @TestParameter boolean isScrubbingModeEnabled) throws Exception {
+    player = createCompositionPlayer(context, capturingAudioSink);
+    PositionOffsetRecorder positionOffsetRecorder = new PositionOffsetRecorder();
+    EditedMediaItem item =
+        new EditedMediaItem.Builder(MediaItem.fromUri(WAV_ASSET.uri))
+            .setDurationUs(1_000_000L)
+            .setEffects(createAudioEffects(positionOffsetRecorder))
+            .build();
+    Composition composition =
+        new Composition.Builder(withAudioFrom(ImmutableList.of(item))).build();
+
+    player.setComposition(composition);
+    player.prepare();
+    advance(player).untilState(STATE_READY);
+
+    player.setScrubbingModeEnabled(isScrubbingModeEnabled);
+    player.seekTo(/* positionMs= */ 500);
+    player.setScrubbingModeEnabled(false);
+    advance(player).untilState(STATE_READY);
+
+    assertThat(getLast(positionOffsetRecorder.positionOffsetsUs)).isEqualTo(500_000L);
+  }
+
+  @Test
+  public void seekToMidClip_withCompositionAudioProcessor_reportsCorrectPositionOffset(
+      @TestParameter boolean isScrubbingModeEnabled) throws Exception {
+    player = createCompositionPlayer(context, capturingAudioSink);
+    PositionOffsetRecorder positionOffsetRecorder = new PositionOffsetRecorder();
+    EditedMediaItem item =
+        new EditedMediaItem.Builder(MediaItem.fromUri(WAV_ASSET.uri))
+            .setDurationUs(1_000_000L)
+            .build();
+    Composition composition =
+        new Composition.Builder(withAudioFrom(ImmutableList.of(item)))
+            .setEffects(createAudioEffects(positionOffsetRecorder))
+            .build();
+
+    player.setComposition(composition);
+    player.prepare();
+    advance(player).untilState(STATE_READY);
+
+    player.setScrubbingModeEnabled(isScrubbingModeEnabled);
+    player.seekTo(/* positionMs= */ 300);
+    player.setScrubbingModeEnabled(false);
+    advance(player).untilState(STATE_READY);
+
+    assertThat(getLast(positionOffsetRecorder.positionOffsetsUs)).isEqualTo(300_000L);
+  }
+
+  @Test
+  public void seekToSecondClip_withMultipleAudioClipSequence_reportsMediaItemRelativePositionOffset(
+      @TestParameter boolean isScrubbingModeEnabled) throws Exception {
+    player = createCompositionPlayer(context, capturingAudioSink);
+    PositionOffsetRecorder positionOffsetRecorder = new PositionOffsetRecorder();
+    EditedMediaItem firstItem =
+        new EditedMediaItem.Builder(MediaItem.fromUri(WAV_ASSET.uri))
+            .setDurationUs(1_000_000L)
+            .build();
+    EditedMediaItem secondItem =
+        new EditedMediaItem.Builder(MediaItem.fromUri(WAV_ASSET.uri))
+            .setDurationUs(1_000_000L)
+            .setEffects(createAudioEffects(positionOffsetRecorder))
+            .build();
+    Composition composition =
+        new Composition.Builder(withAudioFrom(ImmutableList.of(firstItem, secondItem))).build();
+
+    player.setComposition(composition);
+    player.prepare();
+    advance(player).untilState(STATE_READY);
+
+    player.setScrubbingModeEnabled(isScrubbingModeEnabled);
+    player.seekTo(/* positionMs= */ 1200);
+    player.setScrubbingModeEnabled(false);
+    advance(player).untilState(STATE_READY);
+
+    assertThat(getLast(positionOffsetRecorder.positionOffsetsUs)).isEqualTo(200_000L);
+  }
+
+  @Test
+  public void seek_withMultipleAudioSequences_reportsExpectedPositionToEachSequence(
+      @TestParameter boolean isScrubbingModeEnabled) throws Exception {
+    player = createCompositionPlayer(context, capturingAudioSink);
+    PositionOffsetRecorder firstSequenceRecorder = new PositionOffsetRecorder();
+    PositionOffsetRecorder secondSequenceRecorder = new PositionOffsetRecorder();
+
+    EditedMediaItem firstSequenceItem =
+        new EditedMediaItem.Builder(MediaItem.fromUri(WAV_ASSET.uri))
+            .setEffects(createAudioEffects(firstSequenceRecorder))
+            .setDurationUs(1_000_000L)
+            .build();
+    EditedMediaItem secondSequenceItem =
+        new EditedMediaItem.Builder(MediaItem.fromUri(WAV_ASSET.uri))
+            .setDurationUs(1_000_000L)
+            .setEffects(createAudioEffects(secondSequenceRecorder))
+            .build();
+
+    Composition composition =
+        new Composition.Builder(
+                withAudioFrom(ImmutableList.of(firstSequenceItem)),
+                new EditedMediaItemSequence.Builder(ImmutableSet.of(TRACK_TYPE_AUDIO))
+                    .addGap(/* durationUs= */ 300_000)
+                    .addItem(secondSequenceItem)
+                    .build())
+            .build();
+
+    player.setComposition(composition);
+    player.prepare();
+    advance(player).untilState(STATE_READY);
+
+    player.setScrubbingModeEnabled(isScrubbingModeEnabled);
+    player.seekTo(/* positionMs= */ 400);
+    player.setScrubbingModeEnabled(false);
+    player.play();
+    advance(player).untilState(STATE_READY);
+
+    expect.that(getLast(firstSequenceRecorder.positionOffsetsUs)).isEqualTo(400_000L);
+    expect.that(getLast(secondSequenceRecorder.positionOffsetsUs)).isEqualTo(100_000L);
   }
 
   private static class ForwardingAudioMixer implements AudioMixer {

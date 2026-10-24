@@ -32,9 +32,11 @@ import androidx.media3.common.Effect;
 import androidx.media3.common.GlObjectsProvider;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.MediaLibraryInfo;
+import androidx.media3.common.util.ExperimentalApi;
 import androidx.media3.common.util.NullableType;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.effect.DefaultGlObjectsProvider;
+import androidx.media3.effect.Presentation;
 import androidx.media3.effect.RgbMatrix;
 import androidx.media3.exoplayer.DecoderCounters;
 import androidx.media3.exoplayer.SeekParameters;
@@ -87,6 +89,7 @@ public final class FrameExtractor implements AutoCloseable {
     private SeekParameters seekParameters;
     private MediaCodecSelector mediaCodecSelector;
     private boolean extractHdrFrames;
+    private boolean enableUltraHdr;
     @Nullable private GlObjectsProvider glObjectsProvider;
     @Nullable private MediaSource.Factory mediaSourceFactory;
 
@@ -106,6 +109,7 @@ public final class FrameExtractor implements AutoCloseable {
       // b/362904942.
       mediaCodecSelector = MediaCodecSelector.PREFER_SOFTWARE;
       extractHdrFrames = false;
+      enableUltraHdr = false;
     }
 
     /**
@@ -147,26 +151,47 @@ public final class FrameExtractor implements AutoCloseable {
     }
 
     /**
-     * Sets whether HDR {@link Frame#bitmap} should be extracted from HDR videos.
-     *
-     * <p>When set to {@code false}, extracted HDR frames will be tone-mapped to {@link
-     * ColorSpace.Named#BT709}.
+     * Sets whether to extract HDR video frames as HLG Bitmaps.
      *
      * <p>When set to {@code true}, extracted HDR frames will have a high bit depth {@link
      * Bitmap.Config} and {@link ColorSpace.Named#BT2020_HLG}. Extracting HDR frames is only
      * supported on API 34+.
      *
-     * <p>This flag has no effect when the input is SDR.
+     * <p>When set to {@code false}, extracted HDR frames will be tone-mapped to SDR (BT.709).
+     *
+     * <p>{@link #setEnableUltraHdr} controls whether to generate a {@link Bitmap#getGainmap()}.
      *
      * <p>Defaults to {@code false}.
      *
-     * @param extractHdrFrames Whether HDR frames should be returned.
+     * @param extractHdrFrames Whether to extract HDR frames as HLG.
      * @return This builder.
      */
     @CanIgnoreReturnValue
     @RequiresApi(34)
     public Builder setExtractHdrFrames(boolean extractHdrFrames) {
       this.extractHdrFrames = extractHdrFrames;
+      return this;
+    }
+
+    /**
+     * Sets whether to enable UltraHDR extraction.
+     *
+     * <p>When set to {@code true} and {@link #setExtractHdrFrames} is {@code false}, extracting
+     * from an HDR source on API 34+ will produce an UltraHDR image (SDR base + Gainmap).
+     *
+     * <p>When set to {@code false}, extracting from an HDR source will always produce a tone-mapped
+     * SDR image, even on API 34+.
+     *
+     * <p>Defaults to {@code false}.
+     *
+     * @param enableUltraHdr Whether to enable UltraHDR extraction.
+     * @return This builder.
+     */
+    @CanIgnoreReturnValue
+    @RequiresApi(34)
+    @ExperimentalApi // TODO: b/496386990 - Remove once UltraHDR extraction is fully launched.
+    public Builder setEnableUltraHdr(boolean enableUltraHdr) {
+      this.enableUltraHdr = enableUltraHdr;
       return this;
     }
 
@@ -224,6 +249,7 @@ public final class FrameExtractor implements AutoCloseable {
   private final SeekParameters seekParameters;
   private final MediaCodecSelector mediaCodecSelector;
   private final boolean extractHdrFrames;
+  private final boolean enableUltraHdr;
   @Nullable private final GlObjectsProvider glObjectsProvider;
   @Nullable private MediaSource.Factory mediaSourceFactory;
   private final AtomicBoolean released;
@@ -235,6 +261,7 @@ public final class FrameExtractor implements AutoCloseable {
     this.seekParameters = builder.seekParameters;
     this.mediaCodecSelector = builder.mediaCodecSelector;
     this.extractHdrFrames = builder.extractHdrFrames;
+    this.enableUltraHdr = builder.enableUltraHdr;
     this.glObjectsProvider = builder.glObjectsProvider;
     this.mediaSourceFactory = builder.mediaSourceFactory;
     released = new AtomicBoolean(false);
@@ -243,6 +270,19 @@ public final class FrameExtractor implements AutoCloseable {
 
   /**
    * Extracts a representative {@link Frame} for the specified video position.
+   *
+   * <p><b>Performance Guidelines:</b>
+   *
+   * <ul>
+   *   <li><b>Seek Parameters:</b> By default, this method uses {@link SeekParameters#DEFAULT}
+   *       (equivalent to {@link SeekParameters#EXACT}), which requires the decoder to process all
+   *       intermediate frames from the previous keyframe. If exact precision is not required,
+   *       consider configuring the extractor with {@link SeekParameters#CLOSEST_SYNC} to improve
+   *       extraction speed.
+   *   <li><b>Downscaling:</b> If a full-resolution frame is not needed, consider applying a {@link
+   *       Presentation} effect (e.g., {@code Presentation.createForHeight(480)}) to downscale the
+   *       frame during extraction, reducing memory usage and accelerating processing.
+   * </ul>
    *
    * @param positionMs The time position in the {@link MediaItem} for which a frame is extracted, in
    *     milliseconds.
@@ -263,6 +303,7 @@ public final class FrameExtractor implements AutoCloseable {
             this.glObjectsProvider,
             this.mediaSourceFactory,
             this.extractHdrFrames,
+            this.enableUltraHdr,
             positionMs);
 
     return FrameExtractorInternal.getInstance().submitTask(request);
@@ -273,6 +314,10 @@ public final class FrameExtractor implements AutoCloseable {
    *
    * <p>The implementation uses a heuristic to identify a good thumbnail position. If no specific
    * thumbnail position is found, the frame at the beginning of the media is extracted.
+   *
+   * <p><b>Performance Guidelines:</b> If a full-resolution thumbnail is not required, consider
+   * applying a {@link Presentation} effect (e.g., {@code Presentation.createForHeight(480)}) to
+   * downscale the frame during extraction. This reduces memory usage and accelerates processing.
    *
    * @return A {@link ListenableFuture} of the result.
    */
@@ -291,6 +336,7 @@ public final class FrameExtractor implements AutoCloseable {
             glObjectsProvider,
             mediaSourceFactory,
             extractHdrFrames,
+            enableUltraHdr,
             /* positionMs= */ C.TIME_UNSET);
     return FrameExtractorInternal.getInstance().submitTask(request);
   }

@@ -15,6 +15,7 @@
  */
 package androidx.media3.common;
 
+import androidx.annotation.VisibleForTesting;
 import androidx.media3.common.util.TraceUtil;
 import androidx.media3.common.util.UnstableApi;
 import java.util.HashSet;
@@ -28,11 +29,11 @@ public final class MediaLibraryInfo {
 
   /** The version of the library expressed as a string, for example "1.2.3" or "1.2.0-beta01". */
   // Intentionally hardcoded. Do not derive from other constants (e.g. VERSION_INT) or vice versa.
-  public static final String VERSION = "1.10.1";
+  public static final String VERSION = "1.11.1";
 
   /** The version of the library expressed as {@code TAG + "/" + VERSION}. */
   // Intentionally hardcoded. Do not derive from other constants (e.g. VERSION) or vice versa.
-  public static final String VERSION_SLASHY = "AndroidXMedia3/1.10.1";
+  public static final String VERSION_SLASHY = "AndroidXMedia3/1.11.1";
 
   /**
    * The version of the library expressed as an integer, for example 1002003300.
@@ -46,10 +47,34 @@ public final class MediaLibraryInfo {
    * (123-045-006-3-00).
    */
   // Intentionally hardcoded. Do not derive from other constants (e.g. VERSION) or vice versa.
-  public static final int VERSION_INT = 1_010_001_3_00;
+  public static final int VERSION_INT = 1_011_001_3_00;
 
   /** Whether the library was compiled with {@link TraceUtil} trace enabled. */
   public static final boolean TRACE_ENABLED = true;
+
+  /**
+   * Whether to enable device-specific workarounds.
+   *
+   * <p>When set to {@code false}, the library will attempt to bypass device and codec-specific
+   * workarounds, running raw platform code to expose potential platform bugs.
+   */
+  @SuppressWarnings("NonFinalStaticField") // Test-only access
+  private static boolean enableWorkarounds = true;
+
+  /** Returns whether device-specific workarounds are enabled. */
+  public static boolean enableWorkarounds() {
+    return enableWorkarounds;
+  }
+
+  /**
+   * Sets whether device-specific workarounds are enabled.
+   *
+   * <p>This should only be called for certification testing.
+   */
+  @VisibleForTesting
+  public static void setEnableWorkarounds(boolean enable) {
+    enableWorkarounds = enable;
+  }
 
   // LINT.IfChange(interface_version)
   /**
@@ -60,7 +85,7 @@ public final class MediaLibraryInfo {
    * boundaries. If any cross-process interaction requires an incompatible change, this number
    * should be increased to allow the other process to offer backwards-compatible behavior.
    */
-  public static final int INTERFACE_VERSION = 9;
+  public static final int INTERFACE_VERSION = 10;
 
   // LINT.ThenChange()
 

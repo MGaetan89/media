@@ -49,6 +49,8 @@ import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.Message;
 import android.util.SparseArray;
+import android.util.SparseBooleanArray;
+import android.util.SparseIntArray;
 import androidx.annotation.GuardedBy;
 import androidx.annotation.IntDef;
 import androidx.annotation.IntRange;
@@ -60,17 +62,15 @@ import androidx.media3.common.Format;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.MediaLibraryInfo;
 import androidx.media3.common.MimeTypes;
-import androidx.media3.common.SurfaceInfo;
 import androidx.media3.common.VideoFrameProcessor;
 import androidx.media3.common.util.Clock;
 import androidx.media3.common.util.ConditionVariable;
 import androidx.media3.common.util.HandlerWrapper;
 import androidx.media3.common.util.Log;
 import androidx.media3.common.util.Util;
+import androidx.media3.common.video.FrameProcessor;
 import androidx.media3.effect.DebugTraceUtil;
-import androidx.media3.effect.HardwareBufferFrame;
-import androidx.media3.effect.HardwareBufferFrameQueue;
-import androidx.media3.effect.RenderingPacketConsumer;
+import androidx.media3.effect.HardwareBufferJniWrapper;
 import androidx.media3.muxer.MuxerException;
 import androidx.media3.transformer.AssetLoader.CompositionSettings;
 import com.google.common.collect.ImmutableList;
@@ -134,12 +134,9 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
   private final HandlerWrapper applicationHandler;
   private final Clock clock;
 
-  @Nullable
-  private final RenderingPacketConsumer<
-          ImmutableList<HardwareBufferFrame>, HardwareBufferFrameQueue>
-      packetProcessor;
+  @Nullable private final FrameProcessor.Factory frameProcessorFactory;
 
-  @Nullable private final RenderingPacketConsumer<HardwareBufferFrame, SurfaceInfo> packetRenderer;
+  @Nullable private final HardwareBufferJniWrapper hardwareBufferJniWrapper;
 
   /**
    * The presentation timestamp offset for all the video samples. It will be set when resuming video
@@ -217,10 +214,8 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
       HandlerWrapper applicationHandler,
       DebugViewProvider debugViewProvider,
       Clock clock,
-      @Nullable
-          RenderingPacketConsumer<ImmutableList<HardwareBufferFrame>, HardwareBufferFrameQueue>
-              packetProcessor,
-      @Nullable RenderingPacketConsumer<HardwareBufferFrame, SurfaceInfo> packetRenderer,
+      @Nullable FrameProcessor.Factory frameProcessorFactory,
+      @Nullable HardwareBufferJniWrapper hardwareBufferJniWrapper,
       long videoSampleTimestampOffsetUs,
       @Nullable LogSessionId logSessionId,
       boolean applyMp4EditListTrim,
@@ -233,8 +228,8 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
     this.listener = listener;
     this.applicationHandler = applicationHandler;
     this.clock = clock;
-    this.packetProcessor = packetProcessor;
-    this.packetRenderer = packetRenderer;
+    this.frameProcessorFactory = frameProcessorFactory;
+    this.hardwareBufferJniWrapper = hardwareBufferJniWrapper;
     this.videoSampleTimestampOffsetUs = videoSampleTimestampOffsetUs;
     this.muxerWrapper = muxerWrapper;
     this.applyMp4EditListTrim = applyMp4EditListTrim;
@@ -488,7 +483,6 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
       } catch (MuxerException e) {
         if (releaseExportException == null) {
           releaseExportException = ExportException.createForMuxer(e, ERROR_CODE_MUXING_FAILED);
-          cancelException = new RuntimeException(e);
         }
       } catch (RuntimeException e) {
         if (releaseExportException == null) {
@@ -768,7 +762,7 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
                   "assetLoaderOutputFormat has to have a audio, video or image mimetype."));
         }
 
-        if (packetProcessor == null) {
+        if (frameProcessorFactory == null) {
           assetLoaderInputTracker.registerSampleExporter(
               C.TRACK_TYPE_VIDEO,
               new VideoSampleExporter(
@@ -797,11 +791,12 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
           }
           PacketConsumerVideoSampleExporter videoSampleExporter =
               new PacketConsumerVideoSampleExporter(
+                  context,
                   composition,
                   firstFormat,
                   transformationRequest,
-                  checkNotNull(packetProcessor),
-                  packetRenderer,
+                  checkNotNull(frameProcessorFactory),
+                  hardwareBufferJniWrapper,
                   encoderFactory,
                   muxerWrapper,
                   /* errorConsumer= */ this::onError,
@@ -905,7 +900,8 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
                     sequenceIndex,
                     transformationRequest,
                     encoderFactory,
-                    muxerWrapper)
+                    muxerWrapper,
+                    /* hasFrameProcessorFactory= */ frameProcessorFactory != null)
                 || clippingRequiresTranscode(firstEditedMediaItem.mediaItem);
         checkState(
             !applyMp4EditListTrim || !shouldTranscode,
@@ -932,8 +928,8 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
   private static final class AssetLoaderInputTracker {
     private final List<SequenceMetadata> sequencesMetadata;
     private final SparseArray<SampleExporter> trackTypeToSampleExporter;
-    private final SparseArray<Boolean> trackTypeToShouldTranscode;
-    private final SparseArray<Integer> trackTypeToNumberOfRegisteredGraphInput;
+    private final SparseBooleanArray trackTypeToShouldTranscode;
+    private final SparseIntArray trackTypeToNumberOfRegisteredGraphInput;
 
     public AssetLoaderInputTracker(Composition composition) {
       sequencesMetadata = new ArrayList<>();
@@ -941,8 +937,8 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
         sequencesMetadata.add(new SequenceMetadata());
       }
       trackTypeToSampleExporter = new SparseArray<>();
-      trackTypeToShouldTranscode = new SparseArray<>();
-      trackTypeToNumberOfRegisteredGraphInput = new SparseArray<>();
+      trackTypeToShouldTranscode = new SparseBooleanArray();
+      trackTypeToNumberOfRegisteredGraphInput = new SparseIntArray();
     }
 
     /**

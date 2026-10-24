@@ -29,10 +29,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotDisplayed
 import androidx.compose.ui.test.hasContentDescription
-import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onFirst
+import androidx.compose.ui.test.onLast
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.dp
@@ -52,12 +56,6 @@ class PlayerTest {
   private val context: Context = ApplicationProvider.getApplicationContext()
   private val playerTestTag = "player_under_test"
 
-  private fun findTopControls() =
-    composeTestRule.onNode(
-      hasContentDescription(context.getString(R.string.mute_button_shown_muted)) or
-        hasContentDescription(context.getString(R.string.mute_button_shown_unmuted))
-    )
-
   private fun findCenterControls() =
     composeTestRule.onNode(
       hasContentDescription(context.getString(R.string.playpause_button_play)) or
@@ -65,27 +63,24 @@ class PlayerTest {
     )
 
   private fun findBottomControls() =
-    composeTestRule.onNode(
-      hasContentDescription(context.getString(R.string.shuffle_button_shuffle_on)) or
-        hasContentDescription(context.getString(R.string.shuffle_button_shuffle_off))
-    )
+    composeTestRule.onAllNodesWithText("00:00", useUnmergedTree = true)
 
   @Test
   fun player_controlsVisible() {
     composeTestRule.setContent { Player(player = FakePlayer(), showControls = true) }
 
-    findTopControls().assertIsDisplayed()
     findCenterControls().assertIsDisplayed()
-    findBottomControls().assertIsDisplayed()
+    findBottomControls().assertCountEquals(2)
+    findBottomControls().onFirst().assertIsDisplayed()
+    findBottomControls().onLast().assertIsDisplayed()
   }
 
   @Test
   fun player_controlsHidden() {
     composeTestRule.setContent { Player(player = FakePlayer(), showControls = false) }
 
-    findTopControls().assertDoesNotExist()
     findCenterControls().assertDoesNotExist()
-    findBottomControls().assertDoesNotExist()
+    findBottomControls().assertCountEquals(0)
   }
 
   @Test
@@ -98,16 +93,15 @@ class PlayerTest {
         modifier = Modifier.testTag(playerTestTag).clickable { showControls = !showControls },
       )
     }
-    composeTestRule.mainClock.advanceTimeBy(3100)
-    findTopControls().assertDoesNotExist()
     findCenterControls().assertDoesNotExist()
-    findBottomControls().assertDoesNotExist()
+    findBottomControls().assertCountEquals(0)
 
     composeTestRule.onNodeWithTag(playerTestTag).performClick()
 
-    findTopControls().assertIsDisplayed()
     findCenterControls().assertIsDisplayed()
-    findBottomControls().assertIsDisplayed()
+    findBottomControls().assertCountEquals(2)
+    findBottomControls().onFirst().assertIsDisplayed()
+    findBottomControls().onLast().assertIsDisplayed()
   }
 
   @Test
@@ -228,5 +222,48 @@ class PlayerTest {
     composeTestRule.waitForIdle()
 
     composeTestRule.onNodeWithTag("customShutter", useUnmergedTree = true).assertIsDisplayed()
+  }
+
+  @Test
+  fun player_errorControls_areDisplayedAndAlignedCorrectly() {
+    val player = FakePlayer()
+    composeTestRule.setContent {
+      Player(
+        player,
+        Modifier.testTag(playerTestTag),
+        errorOverlay = { _ -> Box(Modifier.testTag("errorMessage")) { BasicText("Error") } },
+      )
+    }
+
+    composeTestRule.onNodeWithTag(playerTestTag).assertExists()
+    composeTestRule.onNodeWithTag("errorMessage", useUnmergedTree = true).assertIsDisplayed()
+  }
+
+  @Test
+  fun player_customErrorMessage_reactsToPlayerChange() {
+    val player = FakePlayer()
+    lateinit var isPlayerNull: MutableState<Boolean>
+    composeTestRule.setContent {
+      isPlayerNull = remember { mutableStateOf(false) }
+      Player(
+        player = if (isPlayerNull.value) null else player,
+        Modifier.testTag(playerTestTag),
+        errorOverlay = { player ->
+          val tag = if (player != null) "errorMessageWithPlayer" else "errorMessageWithoutPlayer"
+          Box(Modifier.testTag(tag)) { BasicText("Error") }
+        },
+      )
+    }
+
+    composeTestRule
+      .onNodeWithTag("errorMessageWithPlayer", useUnmergedTree = true)
+      .assertIsDisplayed()
+
+    isPlayerNull.value = true
+    composeTestRule.waitForIdle()
+
+    composeTestRule
+      .onNodeWithTag("errorMessageWithoutPlayer", useUnmergedTree = true)
+      .assertIsDisplayed()
   }
 }

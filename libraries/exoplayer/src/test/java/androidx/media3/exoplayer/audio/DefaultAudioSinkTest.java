@@ -24,7 +24,6 @@ import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.assertThrows;
 import static org.robolectric.Shadows.shadowOf;
-import static org.robolectric.annotation.Config.ALL_SDKS;
 
 import android.app.UiModeManager;
 import android.content.Context;
@@ -44,13 +43,18 @@ import androidx.media3.common.C;
 import androidx.media3.common.Format;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.PlaybackParameters;
+import androidx.media3.common.Timeline;
 import androidx.media3.common.audio.AudioProcessor;
 import androidx.media3.common.audio.AudioProcessorChain;
+import androidx.media3.common.audio.BaseAudioProcessor;
 import androidx.media3.common.util.Util;
 import androidx.media3.exoplayer.audio.DefaultAudioSink.DefaultAudioProcessorChain;
+import androidx.media3.exoplayer.source.MediaSource.MediaPeriodId;
+import androidx.media3.test.utils.FakeTimeline;
 import androidx.test.core.app.ApplicationProvider;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import com.google.common.collect.ImmutableList;
+import com.google.common.primitives.ImmutableIntArray;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
@@ -59,6 +63,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.After;
 import org.junit.Assert;
@@ -76,7 +81,6 @@ import org.robolectric.shadows.ShadowUIModeManager;
 
 /** Unit tests for {@link DefaultAudioSink}. */
 @RunWith(AndroidJUnit4.class)
-@Config(sdk = ALL_SDKS)
 public final class DefaultAudioSinkTest {
 
   private static final long TIMEOUT_MS = 10_000;
@@ -121,6 +125,30 @@ public final class DefaultAudioSinkTest {
   public void handlesSpecializedAudioProcessorArray() {
     defaultAudioSink =
         new DefaultAudioSink.Builder().setAudioProcessors(new TeeAudioProcessor[0]).build();
+  }
+
+  @Test
+  public void configure_withDownmixingChannelMappingAndInputChannelMask_succeeds()
+      throws Exception {
+    defaultAudioSink =
+        new DefaultAudioSink.Builder(ApplicationProvider.getApplicationContext())
+            .setAudioProcessorChain(new DefaultAudioProcessorChain())
+            .build();
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_RAW)
+            .setPcmEncoding(C.ENCODING_PCM_16BIT)
+            .setChannelCount(6)
+            .setChannelMask(AudioFormat.CHANNEL_OUT_5POINT1)
+            .setSampleRate(SAMPLE_RATE_44_1)
+            .build();
+    AudioSink.AudioSinkConfig config =
+        new AudioSink.AudioSinkConfig.Builder(format)
+            .setOutputChannelMapping(ImmutableIntArray.of(0, 1))
+            .build();
+
+    // Call succeeds without IllegalStateException from format building during downmix
+    defaultAudioSink.configure(config);
   }
 
   @Test
@@ -170,6 +198,72 @@ public final class DefaultAudioSinkTest {
 
     // Based on audio processor chain: 1 second * 2 + 0.01 seconds
     assertThat(currentPositionUs).isEqualTo(2_010_000);
+  }
+
+  @Test
+  public void setOutputStreamOffset_withTimeline_updatesStreamMetadata() throws Exception {
+    AtomicReference<AudioProcessor.StreamMetadata> streamMetadataReference =
+        new AtomicReference<>();
+
+    long windowPositionInFirstPeriodUs = 5_000_000;
+    Timeline timeline =
+        new FakeTimeline(
+            new FakeTimeline.TimelineWindowDefinition.Builder()
+                .setWindowPositionInFirstPeriodUs(windowPositionInFirstPeriodUs)
+                .build());
+    Object periodUid = timeline.getUidOfPeriod(0);
+    MediaPeriodId mediaPeriodId = new MediaPeriodId(periodUid);
+
+    AudioProcessor capturingProcessor =
+        new BaseAudioProcessor() {
+          @Override
+          protected AudioProcessor.AudioFormat onConfigure(
+              AudioProcessor.AudioFormat inputAudioFormat) {
+            return inputAudioFormat;
+          }
+
+          @Override
+          public void queueInput(ByteBuffer inputBuffer) {
+            inputBuffer.position(inputBuffer.limit());
+          }
+
+          @Override
+          protected void onFlush(AudioProcessor.StreamMetadata streamMetadata) {
+            streamMetadataReference.set(streamMetadata);
+          }
+        };
+
+    defaultAudioSink =
+        new DefaultAudioSink.Builder(ApplicationProvider.getApplicationContext())
+            .setAudioProcessorChain(new DefaultAudioProcessorChain(capturingProcessor))
+            .build();
+
+    Format format =
+        STEREO_44_1_FORMAT
+            .buildUpon()
+            .setSampleMimeType(MimeTypes.AUDIO_RAW)
+            .setPcmEncoding(C.ENCODING_PCM_16BIT)
+            .build();
+    defaultAudioSink.configure(
+        new AudioSink.AudioSinkConfig.Builder(format)
+            .setTimeline(timeline)
+            .setMediaPeriodId(mediaPeriodId)
+            .build());
+
+    long presentationTimeUs = 10_000_000;
+    long outputStreamOffsetUs = 8_000_000;
+    defaultAudioSink.setOutputStreamOffsetUs(outputStreamOffsetUs);
+
+    retryUntilTrue(
+        () ->
+            defaultAudioSink.handleBuffer(
+                create1Sec44100HzSilenceBuffer(),
+                presentationTimeUs,
+                /* encodedAccessUnitCount= */ 1));
+
+    // positionOffsetUs = presentationTimeUs - outputStreamOffsetUs + period.getPositionInWindowUs()
+    // positionOffsetUs = 10s - 8s + (-5s) = -3_000_000
+    assertThat(streamMetadataReference.get().positionOffsetUs).isEqualTo(-3_000_000);
   }
 
   @Test
@@ -536,7 +630,7 @@ public final class DefaultAudioSinkTest {
             .setChannelCount(CHANNEL_COUNT_STEREO)
             .setSampleRate(SAMPLE_RATE_44_1)
             .build();
-    audioSink.configure(format, /* specifiedBufferSize= */ 0, /* outputChannels= */ null);
+    audioSink.configure(new AudioSink.AudioSinkConfig.Builder(format).build());
     retryUntilTrue(
         () ->
             audioSink.handleBuffer(
@@ -770,7 +864,7 @@ public final class DefaultAudioSinkTest {
             .setChannelCount(2)
             .setSampleRate(44100)
             .build();
-    audioSink.configure(format, /* specifiedBufferSize= */ 0, /* outputChannels= */ null);
+    audioSink.configure(new AudioSink.AudioSinkConfig.Builder(format).build());
     ByteBuffer silenceBuffer =
         ByteBuffer.allocateDirect(/* sample rate * bit depth * channels */ 44100 * 2 * 2)
             .order(ByteOrder.nativeOrder());
@@ -852,14 +946,109 @@ public final class DefaultAudioSinkTest {
   }
 
   @Test
+  public void configure_withTimelineAndMediaPeriodId_passesMetadataToAudioProcessor()
+      throws Exception {
+    Timeline timeline = new FakeTimeline();
+    Object periodUid = timeline.getUidOfPeriod(/* periodIndex= */ 0);
+    MediaPeriodId mediaPeriodId = new MediaPeriodId(periodUid);
+    AtomicReference<AudioProcessor.StreamMetadata> capturedMetadata = new AtomicReference<>();
+    @SuppressWarnings("SameNameButDifferent") // Using Media3 AudioFormat.
+    AudioProcessor capturingProcessor =
+        new BaseAudioProcessor() {
+          @Override
+          protected AudioFormat onConfigure(AudioFormat inputAudioFormat) {
+            return inputAudioFormat;
+          }
+
+          @Override
+          public void queueInput(ByteBuffer inputBuffer) {
+            inputBuffer.position(inputBuffer.limit());
+          }
+
+          @Override
+          protected void onFlush(AudioProcessor.StreamMetadata streamMetadata) {
+            capturedMetadata.set(streamMetadata);
+          }
+        };
+    defaultAudioSink =
+        new DefaultAudioSink.Builder(ApplicationProvider.getApplicationContext())
+            .setAudioProcessorChain(new DefaultAudioProcessorChain(capturingProcessor))
+            .build();
+
+    Format format =
+        STEREO_44_1_FORMAT
+            .buildUpon()
+            .setSampleMimeType(MimeTypes.AUDIO_RAW)
+            .setPcmEncoding(C.ENCODING_PCM_16BIT)
+            .build();
+    defaultAudioSink.configure(
+        new AudioSink.AudioSinkConfig.Builder(format)
+            .setTimeline(timeline)
+            .setMediaPeriodId(mediaPeriodId)
+            .build());
+    defaultAudioSink.handleBuffer(
+        create1Sec44100HzSilenceBuffer(),
+        /* presentationTimeUs= */ 0,
+        /* encodedAccessUnitCount= */ 1);
+
+    assertThat(capturedMetadata.get().timeline).isEqualTo(timeline);
+    assertThat(capturedMetadata.get().periodUid).isEqualTo(periodUid);
+  }
+
+  @Test
+  public void configure_withEmptyTimeline_passesEmptyTimelineToAudioProcessor() throws Exception {
+    AtomicReference<AudioProcessor.StreamMetadata> capturedMetadata = new AtomicReference<>();
+    @SuppressWarnings("SameNameButDifferent") // Using Media3 AudioFormat.
+    AudioProcessor capturingProcessor =
+        new BaseAudioProcessor() {
+          @Override
+          protected AudioFormat onConfigure(AudioFormat inputAudioFormat) {
+            return inputAudioFormat;
+          }
+
+          @Override
+          public void queueInput(ByteBuffer inputBuffer) {
+            inputBuffer.position(inputBuffer.limit());
+          }
+
+          @Override
+          protected void onFlush(AudioProcessor.StreamMetadata streamMetadata) {
+            capturedMetadata.set(streamMetadata);
+          }
+        };
+    defaultAudioSink =
+        new DefaultAudioSink.Builder(ApplicationProvider.getApplicationContext())
+            .setAudioProcessorChain(new DefaultAudioProcessorChain(capturingProcessor))
+            .build();
+
+    Format format =
+        STEREO_44_1_FORMAT
+            .buildUpon()
+            .setSampleMimeType(MimeTypes.AUDIO_RAW)
+            .setPcmEncoding(C.ENCODING_PCM_16BIT)
+            .build();
+    defaultAudioSink.configure(
+        new AudioSink.AudioSinkConfig.Builder(format)
+            .setTimeline(Timeline.EMPTY)
+            .setMediaPeriodId(null)
+            .build());
+    defaultAudioSink.handleBuffer(
+        create1Sec44100HzSilenceBuffer(),
+        /* presentationTimeUs= */ 0,
+        /* encodedAccessUnitCount= */ 1);
+
+    assertThat(capturedMetadata.get().timeline).isEqualTo(Timeline.EMPTY);
+    assertThat(capturedMetadata.get().periodUid).isNull();
+  }
+
+  @Test
   public void configure_throwsConfigurationException_withInvalidInput() {
     Format format = new Format.Builder().setSampleMimeType(MimeTypes.AUDIO_AAC).build();
     AudioSink.ConfigurationException thrown =
         Assert.assertThrows(
             AudioSink.ConfigurationException.class,
             () ->
-                defaultAudioSink.configure(
-                    format, /* specifiedBufferSize= */ 0, /* outputChannels= */ null));
+                defaultAudioSink.configure(new AudioSink.AudioSinkConfig.Builder(format).build()));
     assertThat(thrown.format).isEqualTo(format);
   }
 
@@ -897,6 +1086,12 @@ public final class DefaultAudioSinkTest {
         new ForwardingAudioOutputProvider(
             new AudioTrackAudioOutputProvider.Builder(context).build()) {
           @Override
+          public OutputConfig getOutputConfig(FormatConfig formatConfig)
+              throws ConfigurationException {
+            return super.getOutputConfig(formatConfig).buildUpon().setBufferSize(2_822_400).build();
+          }
+
+          @Override
           public AudioOutput getAudioOutput(OutputConfig config) throws InitializationException {
             outputBufferSizes.add(config.bufferSize);
             if (outputBufferSizes.size() >= 3) {
@@ -911,7 +1106,7 @@ public final class DefaultAudioSinkTest {
             .setEnableAudioOutputPlaybackParameters(true)
             .build();
     // Specifies a large buffer size.
-    configureDefaultAudioSink(/* channelCount= */ 8, /* specifiedBufferSize= */ 2_822_400);
+    configureDefaultAudioSink(/* channelCount= */ 8);
 
     assertThat(
             defaultAudioSink.handleBuffer(
@@ -932,6 +1127,12 @@ public final class DefaultAudioSinkTest {
         new ForwardingAudioOutputProvider(
             new AudioTrackAudioOutputProvider.Builder(context).build()) {
           @Override
+          public OutputConfig getOutputConfig(FormatConfig formatConfig)
+              throws ConfigurationException {
+            return super.getOutputConfig(formatConfig).buildUpon().setBufferSize(2_822_400).build();
+          }
+
+          @Override
           public AudioOutput getAudioOutput(OutputConfig config) throws InitializationException {
             outputBufferSizes.add(config.bufferSize);
             throw new InitializationException();
@@ -943,7 +1144,7 @@ public final class DefaultAudioSinkTest {
             .setEnableAudioOutputPlaybackParameters(true)
             .build();
     // Specifies a large buffer size.
-    configureDefaultAudioSink(/* channelCount= */ 8, /* specifiedBufferSize= */ 2_822_400);
+    configureDefaultAudioSink(/* channelCount= */ 8);
 
     assertThat(
             defaultAudioSink.handleBuffer(
@@ -952,6 +1153,191 @@ public final class DefaultAudioSinkTest {
                 /* encodedAccessUnitCount= */ 1))
         .isFalse();
     assertThat(outputBufferSizes).containsExactly(2_822_400, 1_411_200, 705_600).inOrder();
+  }
+
+  @Test
+  public void handleBuffer_audioOutputInitializationError_retryDownToOneSecond() throws Exception {
+    Context context = ApplicationProvider.getApplicationContext();
+    ArrayList<Integer> outputBufferSizes = new ArrayList<>();
+    AudioOutputProvider audioOutputProvider =
+        new ForwardingAudioOutputProvider(
+            new AudioTrackAudioOutputProvider.Builder(context).build()) {
+          @Override
+          public OutputConfig getOutputConfig(FormatConfig formatConfig)
+              throws ConfigurationException {
+            return super.getOutputConfig(formatConfig).buildUpon().setBufferSize(2_000_000).build();
+          }
+
+          @Override
+          public AudioOutput getAudioOutput(OutputConfig config) throws InitializationException {
+            outputBufferSizes.add(config.bufferSize);
+            throw new InitializationException();
+          }
+        };
+    defaultAudioSink =
+        new DefaultAudioSink.Builder(context)
+            .setAudioOutputProvider(audioOutputProvider)
+            .setEnableAudioOutputPlaybackParameters(true)
+            .build();
+    configureDefaultAudioSink(/* channelCount= */ 8);
+
+    assertThat(
+            defaultAudioSink.handleBuffer(
+                create1Sec44100HzSilenceBuffer(),
+                /* presentationTimeUs= */ 0,
+                /* encodedAccessUnitCount= */ 1))
+        .isFalse();
+    // 705,600 is 1-sec buffer for 8-ch 44.1kHz 16-bit PCM (44,100 * 8 * 2).
+    assertThat(outputBufferSizes).containsExactly(2_000_000, 1_000_000, 705_600).inOrder();
+  }
+
+  @Config(minSdk = 30)
+  @Test
+  public void handleBuffer_nonPcmAudioOutputInitializationError_retryDownToOneSecond()
+      throws Exception {
+    Context context = ApplicationProvider.getApplicationContext();
+    ArrayList<Integer> outputBufferSizes = new ArrayList<>();
+    AudioOutputProvider audioOutputProvider =
+        new ForwardingAudioOutputProvider(
+            new AudioTrackAudioOutputProvider.Builder(context).build()) {
+          @Override
+          public OutputConfig getOutputConfig(FormatConfig formatConfig)
+              throws ConfigurationException {
+            return super.getOutputConfig(formatConfig).buildUpon().setBufferSize(1_000_000).build();
+          }
+
+          @Override
+          public AudioOutput getAudioOutput(OutputConfig config) throws InitializationException {
+            outputBufferSizes.add(config.bufferSize);
+            throw new InitializationException();
+          }
+        };
+    defaultAudioSink =
+        new DefaultAudioSink.Builder(context)
+            .setAudioOutputProvider(audioOutputProvider)
+            .setEnableAudioOutputPlaybackParameters(true)
+            .build();
+
+    AudioFormat audioFormat =
+        new AudioFormat.Builder()
+            .setSampleRate(SAMPLE_RATE_44_1)
+            .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
+            .setEncoding(AudioFormat.ENCODING_AAC_LC)
+            .build();
+    AudioAttributes audioAttributes =
+        new AudioAttributes.Builder()
+            .setContentType(C.AUDIO_CONTENT_TYPE_UNKNOWN)
+            .setUsage(C.USAGE_MEDIA)
+            .setAllowedCapturePolicy(C.ALLOW_CAPTURE_BY_ALL)
+            .build();
+    ShadowAudioSystem.setOffloadSupported(
+        audioFormat, audioAttributes.getPlatformAudioAttributes(), true);
+    ShadowAudioSystem.setOffloadPlaybackSupport(
+        audioFormat,
+        audioAttributes.getPlatformAudioAttributes(),
+        AudioManager.PLAYBACK_OFFLOAD_SUPPORTED);
+    ShadowAudioSystem.setDirectPlaybackSupport(
+        audioFormat,
+        audioAttributes.getPlatformAudioAttributes(),
+        AudioManager.DIRECT_PLAYBACK_OFFLOAD_SUPPORTED);
+
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_AAC)
+            .setChannelCount(2)
+            .setSampleRate(SAMPLE_RATE_44_1)
+            .setAverageBitrate(128_000)
+            .setCodecs("mp4a.40.02")
+            .build();
+
+    defaultAudioSink.setOffloadMode(AudioSink.OFFLOAD_MODE_ENABLED_GAPLESS_NOT_REQUIRED);
+    defaultAudioSink.configure(new AudioSink.AudioSinkConfig.Builder(format).build());
+
+    assertThrows(
+        AudioSink.InitializationException.class,
+        () ->
+            defaultAudioSink.handleBuffer(
+                create1Sec44100HzSilenceBuffer(),
+                /* presentationTimeUs= */ 0,
+                /* encodedAccessUnitCount= */ 1));
+    // 16,000 is 1-sec buffer for 128 kbps bitrate (128,000 / 8).
+    assertThat(outputBufferSizes)
+        .containsExactly(1_000_000, 500_000, 250_000, 125_000, 62_500, 31_250, 16_000)
+        .inOrder();
+  }
+
+  @Config(minSdk = 30)
+  @Test
+  public void handleBuffer_nonPcmAudioOutputInitializationErrorUnknownBitrate_retryDownToOneSecond()
+      throws Exception {
+    Context context = ApplicationProvider.getApplicationContext();
+    ArrayList<Integer> outputBufferSizes = new ArrayList<>();
+    AudioOutputProvider audioOutputProvider =
+        new ForwardingAudioOutputProvider(
+            new AudioTrackAudioOutputProvider.Builder(context).build()) {
+          @Override
+          public OutputConfig getOutputConfig(FormatConfig formatConfig)
+              throws ConfigurationException {
+            return super.getOutputConfig(formatConfig).buildUpon().setBufferSize(1_000_000).build();
+          }
+
+          @Override
+          public AudioOutput getAudioOutput(OutputConfig config) throws InitializationException {
+            outputBufferSizes.add(config.bufferSize);
+            throw new InitializationException();
+          }
+        };
+    defaultAudioSink =
+        new DefaultAudioSink.Builder(context)
+            .setAudioOutputProvider(audioOutputProvider)
+            .setEnableAudioOutputPlaybackParameters(true)
+            .build();
+
+    AudioFormat audioFormat =
+        new AudioFormat.Builder()
+            .setSampleRate(SAMPLE_RATE_44_1)
+            .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
+            .setEncoding(AudioFormat.ENCODING_AAC_LC)
+            .build();
+    AudioAttributes audioAttributes =
+        new AudioAttributes.Builder()
+            .setContentType(C.AUDIO_CONTENT_TYPE_UNKNOWN)
+            .setUsage(C.USAGE_MEDIA)
+            .setAllowedCapturePolicy(C.ALLOW_CAPTURE_BY_ALL)
+            .build();
+    ShadowAudioSystem.setOffloadSupported(
+        audioFormat, audioAttributes.getPlatformAudioAttributes(), true);
+    ShadowAudioSystem.setOffloadPlaybackSupport(
+        audioFormat,
+        audioAttributes.getPlatformAudioAttributes(),
+        AudioManager.PLAYBACK_OFFLOAD_SUPPORTED);
+    ShadowAudioSystem.setDirectPlaybackSupport(
+        audioFormat,
+        audioAttributes.getPlatformAudioAttributes(),
+        AudioManager.DIRECT_PLAYBACK_OFFLOAD_SUPPORTED);
+
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_AAC)
+            .setChannelCount(2)
+            .setSampleRate(SAMPLE_RATE_44_1)
+            .setCodecs("mp4a.40.02")
+            .build();
+
+    defaultAudioSink.setOffloadMode(AudioSink.OFFLOAD_MODE_ENABLED_GAPLESS_NOT_REQUIRED);
+    defaultAudioSink.configure(new AudioSink.AudioSinkConfig.Builder(format).build());
+
+    assertThrows(
+        AudioSink.InitializationException.class,
+        () ->
+            defaultAudioSink.handleBuffer(
+                create1Sec44100HzSilenceBuffer(),
+                /* presentationTimeUs= */ 0,
+                /* encodedAccessUnitCount= */ 1));
+    // 100,000 is 1-sec buffer deduced from AAC_LC max rate (800 kbps / 8).
+    assertThat(outputBufferSizes)
+        .containsExactly(1_000_000, 500_000, 250_000, 125_000, 100_000)
+        .inOrder();
   }
 
   @Test
@@ -1000,7 +1386,6 @@ public final class DefaultAudioSinkTest {
     assertThat(e.isRecoverable).isTrue();
   }
 
-  @Config(sdk = ALL_SDKS)
   @Test
   public void getAudioTrackBufferDurationUs_withPcm_calculatesCorrectValue() throws Exception {
     configureDefaultAudioSink(/* channelCount= */ 2);
@@ -1011,7 +1396,7 @@ public final class DefaultAudioSinkTest {
                 /* presentationTimeUs= */ 0,
                 /* encodedAccessUnitCount= */ 1))
         .isTrue();
-    assertThat(defaultAudioSink.getAudioTrackBufferSizeUs()).isEqualTo(250_000L);
+    assertThat(defaultAudioSink.getAudioTrackBufferSizeUs()).isEqualTo(500_000L);
   }
 
   @Config(minSdk = 30)
@@ -1146,23 +1531,209 @@ public final class DefaultAudioSinkTest {
     assertThat(actualPlaybackParameters.get()).isEqualTo(expectedMaxSpeedParameters);
   }
 
-  private void configureDefaultAudioSink(int channelCount) throws AudioSink.ConfigurationException {
-    configureDefaultAudioSink(channelCount, /* trimStartFrames= */ 0, /* trimEndFrames= */ 0);
+  @Config(minSdk = 30)
+  @Test
+  public void hasPendingData_withPartialOffloadEncodedFrameWrite_returnsTrue() throws Exception {
+    Context context = ApplicationProvider.getApplicationContext();
+    // Create a custom AudioOutputProvider that simulates a partial write of the compressed content.
+    AudioOutputProvider audioOutputProvider =
+        new ForwardingAudioOutputProvider(
+            new AudioTrackAudioOutputProvider.Builder(context).build()) {
+          @Override
+          public AudioOutput getAudioOutput(OutputConfig config) throws InitializationException {
+            return new ForwardingAudioOutput(super.getAudioOutput(config)) {
+              @Override
+              public boolean write(
+                  ByteBuffer buffer, int encodedAccessUnitCount, long presentationTimeUs)
+                  throws WriteException {
+                // Mock a partial write of 1024 bytes.
+                int bytesWritten = Math.min(buffer.remaining(), 1024);
+                buffer.position(buffer.position() + bytesWritten);
+                return false;
+              }
+            };
+          }
+        };
+    defaultAudioSink =
+        new DefaultAudioSink.Builder(context).setAudioOutputProvider(audioOutputProvider).build();
+    AudioFormat audioFormat =
+        new AudioFormat.Builder()
+            .setSampleRate(SAMPLE_RATE_44_1)
+            .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
+            .setEncoding(AudioFormat.ENCODING_AAC_LC)
+            .build();
+    AudioAttributes audioAttributes =
+        new AudioAttributes.Builder()
+            .setContentType(C.AUDIO_CONTENT_TYPE_UNKNOWN)
+            .setUsage(C.USAGE_MEDIA)
+            .setAllowedCapturePolicy(C.ALLOW_CAPTURE_BY_ALL)
+            .build();
+    ShadowAudioSystem.setOffloadSupported(
+        audioFormat, audioAttributes.getPlatformAudioAttributes(), true);
+    ShadowAudioSystem.setOffloadPlaybackSupport(
+        audioFormat,
+        audioAttributes.getPlatformAudioAttributes(),
+        AudioManager.PLAYBACK_OFFLOAD_SUPPORTED);
+    ShadowAudioSystem.setDirectPlaybackSupport(
+        audioFormat,
+        audioAttributes.getPlatformAudioAttributes(),
+        AudioManager.DIRECT_PLAYBACK_OFFLOAD_SUPPORTED);
+    configureDefaultAudioSinkWithOffload();
+
+    ByteBuffer largeBuffer = ByteBuffer.allocateDirect(11 * 1024).order(ByteOrder.nativeOrder());
+    boolean handled =
+        defaultAudioSink.handleBuffer(
+            largeBuffer, /* presentationTimeUs= */ 0, /* encodedAccessUnitCount= */ 32);
+    assertThat(handled).isFalse();
+
+    assertThat(defaultAudioSink.hasPendingData()).isTrue();
   }
 
-  private void configureDefaultAudioSink(int channelCount, int specifiedBufferSize)
-      throws AudioSink.ConfigurationException {
-    Format format =
-        new Format.Builder()
-            .setSampleMimeType(MimeTypes.AUDIO_RAW)
-            .setPcmEncoding(C.ENCODING_PCM_16BIT)
-            .setChannelCount(channelCount)
+  @Config(minSdk = 30)
+  @Test
+  public void hasPendingData_withZeroBytesOffloadEncodedFrameWritten_returnsFalse()
+      throws Exception {
+    Context context = ApplicationProvider.getApplicationContext();
+    // Create a custom AudioOutputProvider that blocks all writes.
+    AudioOutputProvider audioOutputProvider =
+        new ForwardingAudioOutputProvider(
+            new AudioTrackAudioOutputProvider.Builder(context).build()) {
+          @Override
+          public AudioOutput getAudioOutput(OutputConfig config) throws InitializationException {
+            return new ForwardingAudioOutput(super.getAudioOutput(config)) {
+              @Override
+              public boolean write(
+                  ByteBuffer buffer, int encodedAccessUnitCount, long presentationTimeUs)
+                  throws WriteException {
+                return false;
+              }
+            };
+          }
+        };
+    defaultAudioSink =
+        new DefaultAudioSink.Builder(context).setAudioOutputProvider(audioOutputProvider).build();
+    AudioFormat audioFormat =
+        new AudioFormat.Builder()
             .setSampleRate(SAMPLE_RATE_44_1)
-            .setEncoderDelay(0)
-            .setEncoderPadding(0)
+            .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
+            .setEncoding(AudioFormat.ENCODING_AAC_LC)
             .build();
-    defaultAudioSink.configure(
-        format, /* specifiedBufferSize= */ specifiedBufferSize, /* outputChannels= */ null);
+    AudioAttributes audioAttributes =
+        new AudioAttributes.Builder()
+            .setContentType(C.AUDIO_CONTENT_TYPE_UNKNOWN)
+            .setUsage(C.USAGE_MEDIA)
+            .setAllowedCapturePolicy(C.ALLOW_CAPTURE_BY_ALL)
+            .build();
+    ShadowAudioSystem.setOffloadSupported(
+        audioFormat, audioAttributes.getPlatformAudioAttributes(), true);
+    ShadowAudioSystem.setOffloadPlaybackSupport(
+        audioFormat,
+        audioAttributes.getPlatformAudioAttributes(),
+        AudioManager.PLAYBACK_OFFLOAD_SUPPORTED);
+    ShadowAudioSystem.setDirectPlaybackSupport(
+        audioFormat,
+        audioAttributes.getPlatformAudioAttributes(),
+        AudioManager.DIRECT_PLAYBACK_OFFLOAD_SUPPORTED);
+    configureDefaultAudioSinkWithOffload();
+
+    ByteBuffer largeBuffer = ByteBuffer.allocateDirect(11 * 1024).order(ByteOrder.nativeOrder());
+    boolean handled =
+        defaultAudioSink.handleBuffer(
+            largeBuffer, /* presentationTimeUs= */ 0, /* encodedAccessUnitCount= */ 32);
+    assertThat(handled).isFalse();
+
+    assertThat(defaultAudioSink.hasPendingData()).isFalse();
+  }
+
+  @Config(minSdk = 30)
+  @Test
+  public void hasPendingData_withGaplessPartialOffloadEncodedFrameWrite_returnsTrue()
+      throws Exception {
+    Context context = ApplicationProvider.getApplicationContext();
+    AtomicBoolean simulatePartialWrite = new AtomicBoolean(false);
+    AtomicLong mockPositionUs = new AtomicLong(0);
+    AudioOutputProvider audioOutputProvider =
+        new ForwardingAudioOutputProvider(
+            new AudioTrackAudioOutputProvider.Builder(context).build()) {
+          @Override
+          public AudioOutput getAudioOutput(OutputConfig config) throws InitializationException {
+            return new ForwardingAudioOutput(super.getAudioOutput(config)) {
+              @Override
+              public boolean write(
+                  ByteBuffer buffer, int encodedAccessUnitCount, long presentationTimeUs)
+                  throws WriteException {
+                if (simulatePartialWrite.get()) {
+                  int bytesWritten = Math.min(buffer.remaining(), 1024);
+                  buffer.position(buffer.position() + bytesWritten);
+                  return false;
+                }
+                buffer.position(buffer.limit());
+                return true;
+              }
+
+              @Override
+              public long getPositionUs() {
+                return mockPositionUs.get();
+              }
+            };
+          }
+        };
+    defaultAudioSink =
+        new DefaultAudioSink.Builder(context).setAudioOutputProvider(audioOutputProvider).build();
+    AudioFormat audioFormat =
+        new AudioFormat.Builder()
+            .setSampleRate(SAMPLE_RATE_44_1)
+            .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
+            .setEncoding(AudioFormat.ENCODING_AAC_LC)
+            .build();
+    AudioAttributes audioAttributes =
+        new AudioAttributes.Builder()
+            .setContentType(C.AUDIO_CONTENT_TYPE_UNKNOWN)
+            .setUsage(C.USAGE_MEDIA)
+            .setAllowedCapturePolicy(C.ALLOW_CAPTURE_BY_ALL)
+            .build();
+    ShadowAudioSystem.setOffloadSupported(
+        audioFormat, audioAttributes.getPlatformAudioAttributes(), true);
+    ShadowAudioSystem.setOffloadPlaybackSupport(
+        audioFormat,
+        audioAttributes.getPlatformAudioAttributes(),
+        AudioManager.PLAYBACK_OFFLOAD_SUPPORTED);
+    ShadowAudioSystem.setDirectPlaybackSupport(
+        audioFormat,
+        audioAttributes.getPlatformAudioAttributes(),
+        AudioManager.DIRECT_PLAYBACK_OFFLOAD_SUPPORTED);
+    configureDefaultAudioSinkWithOffload();
+    ByteBuffer bufferA = ByteBuffer.allocateDirect(11 * 1024).order(ByteOrder.nativeOrder());
+    boolean handledA =
+        defaultAudioSink.handleBuffer(
+            bufferA, /* presentationTimeUs= */ 0, /* encodedAccessUnitCount= */ 32);
+    assertThat(handledA).isTrue();
+
+    // Reconfigure the sink for Track B (gapless reuse transition).
+    Format formatB =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_AAC)
+            .setChannelCount(2)
+            .setSampleRate(SAMPLE_RATE_44_1)
+            .setCodecs("mp4a.40.02")
+            .build();
+    defaultAudioSink.configure(new AudioSink.AudioSinkConfig.Builder(formatB).build());
+    simulatePartialWrite.set(true);
+
+    ByteBuffer bufferB = ByteBuffer.allocateDirect(11 * 1024).order(ByteOrder.nativeOrder());
+    boolean handledB =
+        defaultAudioSink.handleBuffer(
+            bufferB, /* presentationTimeUs= */ 3_000_000, /* encodedAccessUnitCount= */ 32);
+    assertThat(handledB).isFalse();
+
+    // Advance the mock playhead past Track A's duration.
+    mockPositionUs.set(750_000);
+
+    assertThat(defaultAudioSink.hasPendingData()).isTrue();
+  }
+
+  private void configureDefaultAudioSink(int channelCount) throws AudioSink.ConfigurationException {
+    configureDefaultAudioSink(channelCount, /* trimStartFrames= */ 0, /* trimEndFrames= */ 0);
   }
 
   private void configureDefaultAudioSink(int channelCount, int trimStartFrames, int trimEndFrames)
@@ -1176,7 +1747,7 @@ public final class DefaultAudioSinkTest {
             .setEncoderDelay(trimStartFrames)
             .setEncoderPadding(trimEndFrames)
             .build();
-    defaultAudioSink.configure(format, /* specifiedBufferSize= */ 0, /* outputChannels= */ null);
+    defaultAudioSink.configure(new AudioSink.AudioSinkConfig.Builder(format).build());
   }
 
   private void configureDefaultAudioSinkWithOffload() throws AudioSink.ConfigurationException {
@@ -1189,7 +1760,7 @@ public final class DefaultAudioSinkTest {
             .build();
 
     defaultAudioSink.setOffloadMode(AudioSink.OFFLOAD_MODE_ENABLED_GAPLESS_NOT_REQUIRED);
-    defaultAudioSink.configure(format, /* specifiedBufferSize= */ 0, /* outputChannels= */ null);
+    defaultAudioSink.configure(new AudioSink.AudioSinkConfig.Builder(format).build());
   }
 
   // Adding the permission to the test AndroidManifest.xml doesn't work to appease lint.

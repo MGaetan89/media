@@ -132,16 +132,13 @@ public final class DefaultMediaCodecAdapterFactory implements MediaCodecAdapter.
   }
 
   /**
-   * Sets whether to enable {@link MediaCodec#CONFIGURE_FLAG_USE_CRYPTO_ASYNC} on API 34 and above
-   * for {@link AsynchronousMediaCodecAdapter} instances.
+   * Sets whether to enable {@link MediaCodec#CONFIGURE_FLAG_USE_CRYPTO_ASYNC} on API 36 and above
+   * for {@link AsynchronousMediaCodecAdapter} instances. The default is {@code true}.
    *
-   * <p>This method is experimental. Its default value may change, or it may be renamed or removed
-   * in a future release.
+   * @return This factory, for convenience.
    */
   @CanIgnoreReturnValue
-  @ExperimentalApi // TODO: b/470368123 - Remove method once flag usage once safe.
-  public DefaultMediaCodecAdapterFactory experimentalSetAsyncCryptoFlagEnabled(
-      boolean enableAsyncCryptoFlag) {
+  public DefaultMediaCodecAdapterFactory setAsyncCryptoFlagEnabled(boolean enableAsyncCryptoFlag) {
     asyncCryptoFlagEnabled = enableAsyncCryptoFlag;
     return this;
   }
@@ -182,7 +179,7 @@ public final class DefaultMediaCodecAdapterFactory implements MediaCodecAdapter.
               ? new AsynchronousMediaCodecAdapter.Factory(
                   callbackThreadSupplier, queueingThreadSupplier)
               : new AsynchronousMediaCodecAdapter.Factory(trackType);
-      factory.experimentalSetAsyncCryptoFlagEnabled(asyncCryptoFlagEnabled);
+      factory.setAsyncCryptoFlagEnabled(asyncCryptoFlagEnabled);
       factory.setAsyncCryptoSynchronizationEnabled(asyncCryptoSynchronizationEnabled);
       return factory.createAdapter(configuration);
     }

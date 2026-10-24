@@ -16,6 +16,7 @@
 package androidx.media3.common.util;
 
 import static androidx.media3.common.util.CodecSpecificDataUtil.getCodecProfileAndLevel;
+import static androidx.media3.common.util.CodecSpecificDataUtil.getMediaCodecProfileAndLevel;
 import static com.google.common.truth.Truth.assertThat;
 
 import android.media.MediaCodecInfo;
@@ -27,6 +28,8 @@ import androidx.media3.common.Format;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.test.utils.TestUtil;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
+import com.google.common.collect.ImmutableList;
+import java.nio.ByteBuffer;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
@@ -58,7 +61,7 @@ public class CodecSpecificDataUtilTest {
   public void getCodecProfileAndLevel_handlesH263CodecString() {
     assertCodecProfileAndLevelForCodecsString(
         MimeTypes.VIDEO_H263,
-        "s263.1.1",
+        "s263.0.10",
         MediaCodecInfo.CodecProfileLevel.H263ProfileBaseline,
         MediaCodecInfo.CodecProfileLevel.H263Level10);
   }
@@ -169,6 +172,17 @@ public class CodecSpecificDataUtilTest {
   }
 
   @Test
+  public void getMediaCodecProfileAndLevel_handlesAv1ProfileHigh() {
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.VIDEO_AV1)
+            .setCodecs("av01.1.10M.8")
+            .build();
+
+    assertThat(getMediaCodecProfileAndLevel(format).isSupportableByMediaCodec()).isFalse();
+  }
+
+  @Test
   public void getCodecProfileAndLevel_handlesFullAv1CodecString() {
     // Example from https://aomediacodec.github.io/av1-isobmff/#codecsparam.
     assertCodecProfileAndLevelForCodecsString(
@@ -238,15 +252,6 @@ public class CodecSpecificDataUtilTest {
         "apv1.apvf44.apvl60.apvb2",
         MediaCodecInfo.CodecProfileLevel.APVProfile422_10HDR10Plus,
         MediaCodecInfo.CodecProfileLevel.APVLevel2Band2);
-  }
-
-  @Test
-  public void getCodecProfileAndLevel_handlesMvHevcCodecString() {
-    assertCodecProfileAndLevelForCodecsString(
-        MimeTypes.VIDEO_MV_HEVC,
-        "hvc1.6.40.L120.BF.80",
-        /* profile= */ 6,
-        MediaCodecInfo.CodecProfileLevel.HEVCMainTierLevel4);
   }
 
   @Test
@@ -322,6 +327,16 @@ public class CodecSpecificDataUtilTest {
   }
 
   @Test
+  public void getMediaCodecProfileAndLevel_mvHevcWithNoMatchingMediaCodecConstant_unsupportable() {
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.VIDEO_MV_HEVC)
+            .setCodecs("hvc1.6.40.L120.BF.80")
+            .build();
+    assertThat(getMediaCodecProfileAndLevel(format).isSupportableByMediaCodec()).isFalse();
+  }
+
+  @Test
   public void
       getDolbyVisionBaseLayerMimeType_withNonFallbackCompatibleFormat_returnsBaseEncoding() {
     // Profile 10.0 (Full Range PQ) which does NOT allow fallback.
@@ -353,6 +368,59 @@ public class CodecSpecificDataUtilTest {
         .isEqualTo(MimeTypes.VIDEO_AV1);
     assertThat(CodecSpecificDataUtil.getDolbyVisionBaseLayerMimeType(formatDav1FallbackToAv1))
         .isEqualTo(MimeTypes.VIDEO_AV1);
+  }
+
+  @Test
+  public void isHagcMetadata_withHagcPrefix_returnsTrue() {
+    byte[] hagcBytes =
+        TestUtil.createByteArray(0xB5, 0x00, 0x90, 0x00, 0x01, 0x00, 0x00, 0x01, 0x02, 0x03);
+    assertThat(CodecSpecificDataUtil.isHagcMetadata(hagcBytes, hagcBytes.length)).isTrue();
+
+    ByteBuffer buffer = ByteBuffer.wrap(hagcBytes);
+    assertThat(CodecSpecificDataUtil.isHagcMetadata(buffer)).isTrue();
+  }
+
+  @Test
+  public void isHagcMetadata_withShortBuffer_returnsFalse() {
+    byte[] shortBytes = TestUtil.createByteArray(0xB5, 0x00, 0x90);
+    assertThat(CodecSpecificDataUtil.isHagcMetadata(shortBytes, shortBytes.length)).isFalse();
+
+    ByteBuffer buffer = ByteBuffer.wrap(shortBytes);
+    assertThat(CodecSpecificDataUtil.isHagcMetadata(buffer)).isFalse();
+  }
+
+  @Test
+  public void isHagcTrack_withValidHagc_returnsTrue() {
+    byte[] hagcBytes =
+        TestUtil.createByteArray(0xB5, 0x00, 0x90, 0x00, 0x01, 0x00, 0x00, 0x01, 0x02, 0x03);
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.APPLICATION_ITUT_T35)
+            .setInitializationData(ImmutableList.of(hagcBytes))
+            .build();
+    assertThat(CodecSpecificDataUtil.isHagcTrack(format)).isTrue();
+  }
+
+  @Test
+  public void isHagcTrack_withoutHagc_returnsFalse() {
+    byte[] badBytes = TestUtil.createByteArray(0x00, 0x01, 0x02);
+    Format formatWithBadBytes =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.APPLICATION_ITUT_T35)
+            .setInitializationData(ImmutableList.of(badBytes))
+            .build();
+    assertThat(CodecSpecificDataUtil.isHagcTrack(formatWithBadBytes)).isFalse();
+
+    Format formatWithoutInitData =
+        new Format.Builder().setSampleMimeType(MimeTypes.APPLICATION_ITUT_T35).build();
+    assertThat(CodecSpecificDataUtil.isHagcTrack(formatWithoutInitData)).isFalse();
+
+    Format formatWithWrongMimeType =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.VIDEO_H265)
+            .setInitializationData(ImmutableList.of(badBytes))
+            .build();
+    assertThat(CodecSpecificDataUtil.isHagcTrack(formatWithWrongMimeType)).isFalse();
   }
 
   private static void assertCodecProfileAndLevelForCodecsString(

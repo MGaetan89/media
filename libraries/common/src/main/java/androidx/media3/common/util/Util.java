@@ -84,6 +84,8 @@ import android.telephony.TelephonyManager;
 import android.text.TextUtils;
 import android.util.Base64;
 import android.util.SparseArray;
+import android.util.SparseBooleanArray;
+import android.util.SparseIntArray;
 import android.util.SparseLongArray;
 import android.view.Display;
 import android.view.SurfaceView;
@@ -150,6 +152,7 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -161,6 +164,7 @@ import org.checkerframework.checker.nullness.qual.EnsuresNonNull;
 import org.checkerframework.checker.nullness.qual.EnsuresNonNullIf;
 import org.checkerframework.checker.nullness.qual.NonNull;
 import org.checkerframework.checker.nullness.qual.PolyNull;
+import org.checkerframework.dataflow.qual.Pure;
 
 /** Miscellaneous utility methods. */
 public final class Util {
@@ -228,6 +232,12 @@ public final class Util {
   @Deprecated
   public static byte[] toByteArray(InputStream inputStream) throws IOException {
     return ByteStreams.toByteArray(inputStream);
+  }
+
+  /** Converts a single integer into an equivalent 4-byte array in big-endian order. */
+  @UnstableApi
+  public static byte[] toByteArray(int value) {
+    return Ints.toByteArray(value);
   }
 
   /**
@@ -515,7 +525,8 @@ public final class Util {
     return deviceName.contains("emulator")
         || deviceName.contains("emu64a")
         || deviceName.contains("emu64x")
-        || deviceName.contains("generic");
+        || deviceName.contains("generic")
+        || deviceName.contains("vsoc");
   }
 
   /**
@@ -615,6 +626,30 @@ public final class Util {
    */
   @UnstableApi
   public static <T> boolean contains(SparseArray<T> sparseArray, int key) {
+    return sparseArray.indexOfKey(key) >= 0;
+  }
+
+  /**
+   * Returns whether the given {@link SparseIntArray} contains the given key.
+   *
+   * @param sparseArray The {@link SparseIntArray}.
+   * @param key The key.
+   * @return Whether the {@link SparseIntArray} contains the key.
+   */
+  @UnstableApi
+  public static boolean contains(SparseIntArray sparseArray, int key) {
+    return sparseArray.indexOfKey(key) >= 0;
+  }
+
+  /**
+   * Returns whether the given {@link SparseBooleanArray} contains the given key.
+   *
+   * @param sparseArray The {@link SparseBooleanArray}.
+   * @param key The key.
+   * @return Whether the {@link SparseBooleanArray} contains the key.
+   */
+  @UnstableApi
+  public static boolean contains(SparseBooleanArray sparseArray, int key) {
     return sparseArray.indexOfKey(key) >= 0;
   }
 
@@ -1697,6 +1732,20 @@ public final class Util {
   }
 
   /**
+   * Converts a time in nanoseconds to the corresponding time in milliseconds, preserving {@link
+   * C#TIME_UNSET} and {@link C#TIME_END_OF_SOURCE} values.
+   *
+   * @param timeNs The time in nanoseconds.
+   * @return The corresponding time in milliseconds.
+   */
+  @UnstableApi
+  public static long nsToMs(long timeNs) {
+    return (timeNs == C.TIME_UNSET || timeNs == C.TIME_END_OF_SOURCE)
+        ? timeNs
+        : (timeNs / 1_000_000);
+  }
+
+  /**
    * Converts a time in microseconds to the corresponding time in milliseconds, preserving {@link
    * C#TIME_UNSET} and {@link C#TIME_END_OF_SOURCE} values.
    *
@@ -1733,6 +1782,7 @@ public final class Util {
    * @return The total duration, in microseconds, of {@code sampleCount} samples.
    */
   @UnstableApi
+  @Pure
   public static long sampleCountToDurationUs(long sampleCount, int sampleRate) {
     return scaleLargeValue(sampleCount, C.MICROS_PER_SECOND, sampleRate, RoundingMode.DOWN);
   }
@@ -2143,6 +2193,22 @@ public final class Util {
   }
 
   /**
+   * Converts a long to an int, checking that the long value fits within the range of an unsigned
+   * 32-bit integer.
+   *
+   * @param x The long value to convert.
+   * @return The integer result.
+   * @throws IllegalStateException if {@code x} is greater than the maximum value of an unsigned
+   *     32-bit integer (2^32 - 1).
+   */
+  @UnstableApi
+  public static int toUnsignedInt(long x) {
+    long unsignedIntMaxValue = 4_294_967_295L;
+    checkState(x <= unsignedIntMaxValue);
+    return (int) x;
+  }
+
+  /**
    * Returns the long that is composed of the bits of the 2 specified integers.
    *
    * @param mostSignificantBits The 32 most significant bits of the long to return.
@@ -2174,7 +2240,21 @@ public final class Util {
    */
   @UnstableApi
   public static String toHexString(byte[] bytes) {
-    return BaseEncoding.base16().lowerCase().encode(bytes);
+    return toHexString(bytes, 0, bytes.length);
+  }
+
+  /**
+   * Returns a string containing a lower-case hex representation of the bytes provided.
+   *
+   * @param bytes The byte data to convert to hex.
+   * @param offset The offset into data to read from.
+   * @param length The number of bytes to read from data.
+   * @return A String containing the hex representation of {@code bytes} (considering {@code offset}
+   *     and {@code length}).
+   */
+  @UnstableApi
+  public static String toHexString(byte[] bytes, int offset, int length) {
+    return BaseEncoding.base16().lowerCase().encode(bytes, offset, length);
   }
 
   @UnstableApi
@@ -2422,6 +2502,119 @@ public final class Util {
   }
 
   /**
+   * Converts a sample bit depth to a corresponding little-endian float PCM encoding constant.
+   *
+   * @param bitDepth The bit depth. Supported values are 32 and 64.
+   * @return The corresponding float PCM encoding. If the bit depth is unsupported then {@link
+   *     C#ENCODING_INVALID} is returned.
+   */
+  @UnstableApi
+  public static @C.PcmEncoding int getFloatPcmEncoding(int bitDepth) {
+    return getFloatPcmEncoding(bitDepth, LITTLE_ENDIAN);
+  }
+
+  /**
+   * Converts a sample bit depth and byte order to a corresponding float PCM encoding constant.
+   *
+   * @param bitDepth The bit depth. Supported values are 32 and 64.
+   * @param byteOrder The byte order.
+   * @return The corresponding float PCM encoding. If the bit depth is unsupported then {@link
+   *     C#ENCODING_INVALID} is returned.
+   */
+  @UnstableApi
+  public static @C.PcmEncoding int getFloatPcmEncoding(int bitDepth, ByteOrder byteOrder) {
+    switch (bitDepth) {
+      case 32:
+        return byteOrder.equals(LITTLE_ENDIAN)
+            ? C.ENCODING_PCM_FLOAT
+            : C.ENCODING_PCM_FLOAT_BIG_ENDIAN;
+      case 64:
+        return byteOrder.equals(LITTLE_ENDIAN)
+            ? C.ENCODING_PCM_DOUBLE
+            : C.ENCODING_PCM_DOUBLE_BIG_ENDIAN;
+      default:
+        return C.ENCODING_INVALID;
+    }
+  }
+
+  /**
+   * Returns a user-readable string representation of the given {@link C.Encoding}.
+   *
+   * <p>This method is intended for testing and debugging purposes only. The returned string format
+   * is not guaranteed to be stable.
+   *
+   * @param encoding The {@link C.Encoding} value.
+   * @return A string representation of the encoding.
+   */
+  @UnstableApi
+  public static String getEncodingString(@C.Encoding int encoding) {
+    switch (encoding) {
+      case C.ENCODING_AAC_ELD:
+        return "aac-eld";
+      case C.ENCODING_AAC_ER_BSAC:
+        return "aac-er-bsac";
+      case C.ENCODING_AAC_HE_V1:
+        return "aac-he-v1";
+      case C.ENCODING_AAC_HE_V2:
+        return "aac-he-v2";
+      case C.ENCODING_AAC_LC:
+        return "aac-lc";
+      case C.ENCODING_AAC_XHE:
+        return "aac-xhe";
+      case C.ENCODING_AC3:
+        return "ac3";
+      case C.ENCODING_AC4:
+        return "ac4";
+      case C.ENCODING_DOLBY_TRUEHD:
+        return "truehd";
+      case C.ENCODING_DTS:
+        return "dts";
+      case C.ENCODING_DTS_HD:
+        return "dts-hd";
+      case C.ENCODING_DTS_UHD_P2:
+        return "dts-uhd-p2";
+      case C.ENCODING_DSD:
+        return "dsd";
+      case C.ENCODING_E_AC3:
+        return "eac3";
+      case C.ENCODING_E_AC3_JOC:
+        return "eac3-joc";
+      case C.ENCODING_MP3:
+        return "mp3";
+      case C.ENCODING_OPUS:
+        return "opus";
+      case C.ENCODING_PCM_8BIT:
+        return "pcm-8";
+      case C.ENCODING_PCM_16BIT:
+        return "pcm-16";
+      case C.ENCODING_PCM_16BIT_BIG_ENDIAN:
+        return "pcm-16be";
+      case C.ENCODING_PCM_24BIT:
+        return "pcm-24";
+      case C.ENCODING_PCM_24BIT_BIG_ENDIAN:
+        return "pcm-24be";
+      case C.ENCODING_PCM_32BIT:
+        return "pcm-32";
+      case C.ENCODING_PCM_32BIT_BIG_ENDIAN:
+        return "pcm-32be";
+      case C.ENCODING_PCM_DOUBLE:
+        return "pcm-double";
+      case C.ENCODING_PCM_DOUBLE_BIG_ENDIAN:
+        return "pcm-double-be";
+      case C.ENCODING_PCM_FLOAT:
+        return "pcm-float";
+      case C.ENCODING_PCM_FLOAT_BIG_ENDIAN:
+        return "pcm-float-be";
+      case C.ENCODING_INVALID:
+        return "invalid";
+      case Format.NO_VALUE:
+        return "unset";
+      default:
+        return "unknown(" + encoding + ")";
+    }
+  }
+
+  /**
    * Returns whether {@code encoding} is one of the linear PCM encodings.
    *
    * @param encoding The encoding of the audio data.
@@ -2437,7 +2630,9 @@ public final class Util {
         || encoding == C.ENCODING_PCM_32BIT
         || encoding == C.ENCODING_PCM_32BIT_BIG_ENDIAN
         || encoding == C.ENCODING_PCM_FLOAT
-        || encoding == C.ENCODING_PCM_DOUBLE;
+        || encoding == C.ENCODING_PCM_FLOAT_BIG_ENDIAN
+        || encoding == C.ENCODING_PCM_DOUBLE
+        || encoding == C.ENCODING_PCM_DOUBLE_BIG_ENDIAN;
   }
 
   /**
@@ -2453,7 +2648,25 @@ public final class Util {
         || encoding == C.ENCODING_PCM_32BIT
         || encoding == C.ENCODING_PCM_32BIT_BIG_ENDIAN
         || encoding == C.ENCODING_PCM_FLOAT
-        || encoding == C.ENCODING_PCM_DOUBLE;
+        || encoding == C.ENCODING_PCM_FLOAT_BIG_ENDIAN
+        || encoding == C.ENCODING_PCM_DOUBLE
+        || encoding == C.ENCODING_PCM_DOUBLE_BIG_ENDIAN;
+  }
+
+  /**
+   * Returns the audio track channel configuration for the given {@link Format}, or {@link
+   * AudioFormat#CHANNEL_INVALID} if output is not possible.
+   *
+   * @param format The {@link Format} of the input audio.
+   * @return The channel configuration or {@link AudioFormat#CHANNEL_INVALID} if output is not
+   *     possible.
+   */
+  @UnstableApi
+  public static int getAudioTrackChannelConfig(Format format) {
+    if (format.channelMask != Format.NO_VALUE) {
+      return format.channelMask;
+    }
+    return getAudioTrackChannelConfig(format.channelCount);
   }
 
   /**
@@ -2611,6 +2824,7 @@ public final class Util {
    * @return The size of one audio frame in bytes.
    */
   @UnstableApi
+  @Pure
   public static int getPcmFrameSize(@C.PcmEncoding int pcmEncoding, int channelCount) {
     return getByteDepth(pcmEncoding) * channelCount;
   }
@@ -2635,8 +2849,10 @@ public final class Util {
       case C.ENCODING_PCM_32BIT:
       case C.ENCODING_PCM_32BIT_BIG_ENDIAN:
       case C.ENCODING_PCM_FLOAT:
+      case C.ENCODING_PCM_FLOAT_BIG_ENDIAN:
         return 4;
       case C.ENCODING_PCM_DOUBLE:
+      case C.ENCODING_PCM_DOUBLE_BIG_ENDIAN:
         return 8;
       case C.ENCODING_INVALID:
       case Format.NO_VALUE:
@@ -2736,9 +2952,21 @@ public final class Util {
    * @see AudioManager#generateAudioSessionId()
    */
   @UnstableApi
-  public static int generateAudioSessionIdV21(Context context) {
+  public static int generateAudioSessionId(Context context) {
     int audioSessionId = AudioManagerCompat.getAudioManager(context).generateAudioSessionId();
     return audioSessionId != AudioManager.ERROR ? audioSessionId : C.AUDIO_SESSION_ID_UNSET;
+  }
+
+  /**
+   * @deprecated Use {@link #generateAudioSessionId(Context)} instead.
+   */
+  @UnstableApi
+  @Deprecated
+  @InlineMe(
+      replacement = "Util.generateAudioSessionId(context)",
+      imports = "androidx.media3.common.util.Util")
+  public static int generateAudioSessionIdV21(Context context) {
+    return generateAudioSessionId(context);
   }
 
   /**
@@ -4119,8 +4347,15 @@ public final class Util {
     }
   }
 
+  /**
+   * Returns the value of the given system property, or {@code null} if the property cannot be read
+   * or is not set.
+   *
+   * @param name The name of the system property.
+   */
   @Nullable
-  private static String getSystemProperty(String name) {
+  @UnstableApi
+  public static String getSystemProperty(String name) {
     try {
       @SuppressLint("PrivateApi")
       Class<?> systemProperties = Class.forName("android.os.SystemProperties");
@@ -4217,6 +4452,12 @@ public final class Util {
       }
     }
     return languageTag;
+  }
+
+  /** Ignores the future to avoid static code analysis tools to complain. */
+  @UnstableApi
+  public static <T> void ignoreFuture(Future<T> unused) {
+    // Ignore return value of the future.
   }
 
   // Additional mapping from ISO3 to ISO2 language codes.

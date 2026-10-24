@@ -65,6 +65,8 @@ import java.util.List;
 public final class ConfigurationActivity extends AppCompatActivity {
   public static final String SHOULD_REMOVE_AUDIO = "should_remove_audio";
   public static final String SHOULD_REMOVE_VIDEO = "should_remove_video";
+  public static final String ENABLE_AUDIO_TRACK = "enable_audio_track";
+  public static final String ENABLE_VIDEO_TRACK = "enable_video_track";
   public static final String SHOULD_FLATTEN_FOR_SLOW_MOTION = "should_flatten_for_slow_motion";
   public static final String AUDIO_MIME_TYPE = "audio_mime_type";
   public static final String VIDEO_MIME_TYPE = "video_mime_type";
@@ -102,22 +104,22 @@ public final class ConfigurationActivity extends AppCompatActivity {
   public static final String TEXT_OVERLAY_TEXT = "text_overlay_text";
   public static final String TEXT_OVERLAY_TEXT_COLOR = "text_overlay_text_color";
   public static final String TEXT_OVERLAY_ALPHA = "text_overlay_alpha";
+  public static final String ENABLE_PACKET_PROCESSOR = "enable_packet_processor";
 
   // Video effect selections.
   public static final int DIZZY_CROP_INDEX = 0;
-  public static final int EDGE_DETECTOR_INDEX = 1;
-  public static final int COLOR_FILTERS_INDEX = 2;
-  public static final int MAP_WHITE_TO_GREEN_LUT_INDEX = 3;
-  public static final int RGB_ADJUSTMENTS_INDEX = 4;
-  public static final int HSL_ADJUSTMENT_INDEX = 5;
-  public static final int CONTRAST_INDEX = 6;
-  public static final int PERIODIC_VIGNETTE_INDEX = 7;
-  public static final int SPIN_3D_INDEX = 8;
-  public static final int ZOOM_IN_INDEX = 9;
-  public static final int OVERLAY_LOGO_AND_TIMER_INDEX = 10;
-  public static final int BITMAP_OVERLAY_INDEX = 11;
-  public static final int TEXT_OVERLAY_INDEX = 12;
-  public static final int ANIMATING_LOGO_OVERLAY = 13;
+  public static final int COLOR_FILTERS_INDEX = 1;
+  public static final int MAP_WHITE_TO_GREEN_LUT_INDEX = 2;
+  public static final int RGB_ADJUSTMENTS_INDEX = 3;
+  public static final int HSL_ADJUSTMENT_INDEX = 4;
+  public static final int CONTRAST_INDEX = 5;
+  public static final int PERIODIC_VIGNETTE_INDEX = 6;
+  public static final int SPIN_3D_INDEX = 7;
+  public static final int ZOOM_IN_INDEX = 8;
+  public static final int OVERLAY_LOGO_AND_TIMER_INDEX = 9;
+  public static final int BITMAP_OVERLAY_INDEX = 10;
+  public static final int TEXT_OVERLAY_INDEX = 11;
+  public static final int ANIMATING_LOGO_OVERLAY = 12;
 
   // Audio effect selections.
   public static final int HIGH_PITCHED_INDEX = 0;
@@ -168,6 +170,8 @@ public final class ConfigurationActivity extends AppCompatActivity {
   private TextView selectedFileTextView;
   private CheckBox removeAudioCheckbox;
   private CheckBox removeVideoCheckbox;
+  private CheckBox enableAudioTrackCheckbox;
+  private CheckBox enableVideoTrackCheckbox;
   private CheckBox flattenForSlowMotionCheckbox;
   private Spinner audioMimeSpinner;
   private Spinner videoMimeSpinner;
@@ -183,6 +187,7 @@ public final class ConfigurationActivity extends AppCompatActivity {
   private CheckBox produceFragmentedMp4;
   private Spinner hdrModeSpinner;
   private CheckBox enableTrimOptimization;
+  private CheckBox enablePacketProcessorCheckBox;
   private CheckBox enableMp4EditListTrimming;
   private CheckBox enableCodecDbLite;
   private Button selectAudioEffectsButton;
@@ -248,6 +253,9 @@ public final class ConfigurationActivity extends AppCompatActivity {
     removeVideoCheckbox = findViewById(R.id.remove_video_checkbox);
     removeVideoCheckbox.setOnClickListener(this::onRemoveVideo);
 
+    enableAudioTrackCheckbox = findViewById(R.id.enable_audio_track_checkbox);
+    enableVideoTrackCheckbox = findViewById(R.id.enable_video_track_checkbox);
+
     flattenForSlowMotionCheckbox = findViewById(R.id.flatten_for_slow_motion_checkbox);
 
     ArrayAdapter<String> audioMimeAdapter =
@@ -270,6 +278,7 @@ public final class ConfigurationActivity extends AppCompatActivity {
         MimeTypes.VIDEO_H265,
         MimeTypes.VIDEO_MP4V,
         MimeTypes.VIDEO_AV1,
+        MimeTypes.VIDEO_APV,
         MimeTypes.VIDEO_DOLBY_VISION);
 
     ArrayAdapter<String> resolutionHeightAdapter =
@@ -317,6 +326,7 @@ public final class ConfigurationActivity extends AppCompatActivity {
             enableMp4EditListTrimming.setChecked(false);
           }
         });
+    enablePacketProcessorCheckBox = findViewById(R.id.enable_packet_processor);
     enableMp4EditListTrimming.setOnCheckedChangeListener(
         (buttonView, isChecked) -> {
           if (isChecked) {
@@ -376,8 +386,16 @@ public final class ConfigurationActivity extends AppCompatActivity {
   }
 
   private void startExport() {
+    if (!enableAudioTrackCheckbox.isChecked() && !enableVideoTrackCheckbox.isChecked()) {
+      Toast.makeText(getApplicationContext(), R.string.error_select_track_type, Toast.LENGTH_SHORT)
+          .show();
+      return;
+    }
+
     Intent transformerIntent = new Intent(/* packageContext= */ this, TransformerActivity.class);
     Bundle bundle = new Bundle();
+    bundle.putBoolean(ENABLE_AUDIO_TRACK, enableAudioTrackCheckbox.isChecked());
+    bundle.putBoolean(ENABLE_VIDEO_TRACK, enableVideoTrackCheckbox.isChecked());
     bundle.putBoolean(SHOULD_REMOVE_AUDIO, removeAudioCheckbox.isChecked());
     bundle.putBoolean(SHOULD_REMOVE_VIDEO, removeVideoCheckbox.isChecked());
     bundle.putBoolean(SHOULD_FLATTEN_FOR_SLOW_MOTION, flattenForSlowMotionCheckbox.isChecked());
@@ -414,6 +432,7 @@ public final class ConfigurationActivity extends AppCompatActivity {
     bundle.putBoolean(ABORT_SLOW_EXPORT, abortSlowExportCheckBox.isChecked());
     bundle.putBoolean(PRODUCE_FRAGMENTED_MP4, produceFragmentedMp4.isChecked());
     bundle.putBoolean(ENABLE_TRIM_OPTIMIZATION, enableTrimOptimization.isChecked());
+    bundle.putBoolean(ENABLE_PACKET_PROCESSOR, enablePacketProcessorCheckBox.isChecked());
     bundle.putBoolean(ENABLE_MP4_EDIT_LIST_TRIMMING, enableMp4EditListTrimming.isChecked());
     bundle.putBoolean(ENABLE_CODECDB_LITE, enableCodecDbLite.isChecked());
     String selectedHdrMode = String.valueOf(hdrModeSpinner.getSelectedItem());

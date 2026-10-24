@@ -98,8 +98,10 @@ public class ChunkSampleStream<T extends ChunkSource>
   @Nullable private BaseMediaChunk canceledMediaChunk;
   private boolean needToEvaluateInitialDiscontinuity;
   private boolean hasInitialDiscontinuity;
+  // TODO: b/510217604 - Remove this field.
+  private boolean usesStreamPrerollFlags;
   private boolean suppressRead;
-
+  private long endPositionUs;
   /* package */ boolean loadingFinished;
 
   /**
@@ -174,6 +176,7 @@ public class ChunkSampleStream<T extends ChunkSource>
     chunkOutput = new BaseMediaChunkOutput(trackTypes, sampleQueues);
     pendingResetPositionUs = positionUs;
     lastSeekPositionUs = positionUs;
+    endPositionUs = C.TIME_END_OF_SOURCE;
 
     needToEvaluateInitialDiscontinuity = handleInitialDiscontinuity;
     if (handleInitialDiscontinuity && firstChunkStartTimeUs != C.TIME_UNSET) {
@@ -363,9 +366,18 @@ public class ChunkSampleStream<T extends ChunkSource>
    *     C#TIME_END_OF_SOURCE} to not set an end position.
    */
   public void setEndPositionUs(long endPositionUs) {
+    boolean continueLoadingNeeded =
+        loadingFinished
+            && this.endPositionUs != C.TIME_END_OF_SOURCE
+            && (endPositionUs == C.TIME_END_OF_SOURCE || endPositionUs > this.endPositionUs);
+    this.endPositionUs = endPositionUs;
     primarySampleQueue.setReadEndTimeUs(endPositionUs);
     for (SampleQueue embeddedSampleQueue : embeddedSampleQueues) {
       embeddedSampleQueue.setReadEndTimeUs(endPositionUs);
+    }
+    if (continueLoadingNeeded) {
+      loadingFinished = false;
+      callback.onContinueLoadingRequested(this);
     }
   }
 
@@ -429,7 +441,9 @@ public class ChunkSampleStream<T extends ChunkSource>
   @Override
   public int readData(
       FormatHolder formatHolder, DecoderInputBuffer buffer, @ReadFlags int readFlags) {
-    if (isPendingReset() || mayHaveInitialDiscontinuity() || suppressRead) {
+    boolean shouldBlockForInitialDiscontinuity =
+        !usesStreamPrerollFlags && mayHaveInitialDiscontinuity();
+    if (isPendingReset() || shouldBlockForInitialDiscontinuity || suppressRead) {
       return C.RESULT_NOTHING_READ;
     }
     if (canceledMediaChunk != null
@@ -446,7 +460,9 @@ public class ChunkSampleStream<T extends ChunkSource>
 
   @Override
   public int skipData(long positionUs) {
-    if (isPendingReset() || mayHaveInitialDiscontinuity() || suppressRead) {
+    boolean shouldBlockForInitialDiscontinuity =
+        !usesStreamPrerollFlags && mayHaveInitialDiscontinuity();
+    if (isPendingReset() || shouldBlockForInitialDiscontinuity || suppressRead) {
       return 0;
     }
     int skipCount = primarySampleQueue.getSkipCount(positionUs, loadingFinished);
@@ -468,19 +484,17 @@ public class ChunkSampleStream<T extends ChunkSource>
   @Override
   public void onLoadStarted(
       Chunk loadable, long elapsedRealtimeMs, long loadDurationMs, int retryCount) {
-    LoadEventInfo loadEventInfo =
-        retryCount == 0
-            ? new LoadEventInfo(loadable.loadTaskId, loadable.dataSpec, elapsedRealtimeMs)
-            : new LoadEventInfo(
-                loadable.loadTaskId,
-                loadable.dataSpec,
-                loadable.getUri(),
-                loadable.getResponseHeaders(),
-                elapsedRealtimeMs,
-                loadDurationMs,
-                loadable.bytesLoaded());
+    LoadEventInfo.Builder loadEventInfo =
+        new LoadEventInfo.Builder(loadable.loadTaskId, loadable.dataSpec, elapsedRealtimeMs);
+    if (retryCount != 0) {
+      loadEventInfo
+          .setUri(loadable.getUri())
+          .setResponseHeaders(loadable.getResponseHeaders())
+          .setLoadDurationMs(loadDurationMs)
+          .setBytesLoaded(loadable.bytesLoaded());
+    }
     mediaSourceEventDispatcher.loadStarted(
-        loadEventInfo,
+        loadEventInfo.build(),
         loadable.type,
         primaryTrackType,
         loadable.trackFormat,
@@ -496,14 +510,12 @@ public class ChunkSampleStream<T extends ChunkSource>
     loadingChunk = null;
     chunkSource.onChunkLoadCompleted(loadable);
     LoadEventInfo loadEventInfo =
-        new LoadEventInfo(
-            loadable.loadTaskId,
-            loadable.dataSpec,
-            loadable.getUri(),
-            loadable.getResponseHeaders(),
-            elapsedRealtimeMs,
-            loadDurationMs,
-            loadable.bytesLoaded());
+        new LoadEventInfo.Builder(loadable.loadTaskId, loadable.dataSpec, elapsedRealtimeMs)
+            .setUri(loadable.getUri())
+            .setResponseHeaders(loadable.getResponseHeaders())
+            .setLoadDurationMs(loadDurationMs)
+            .setBytesLoaded(loadable.bytesLoaded())
+            .build();
     loadErrorHandlingPolicy.onLoadTaskConcluded(loadable.loadTaskId);
     mediaSourceEventDispatcher.loadCompleted(
         loadEventInfo,
@@ -523,14 +535,12 @@ public class ChunkSampleStream<T extends ChunkSource>
     loadingChunk = null;
     canceledMediaChunk = null;
     LoadEventInfo loadEventInfo =
-        new LoadEventInfo(
-            loadable.loadTaskId,
-            loadable.dataSpec,
-            loadable.getUri(),
-            loadable.getResponseHeaders(),
-            elapsedRealtimeMs,
-            loadDurationMs,
-            loadable.bytesLoaded());
+        new LoadEventInfo.Builder(loadable.loadTaskId, loadable.dataSpec, elapsedRealtimeMs)
+            .setUri(loadable.getUri())
+            .setResponseHeaders(loadable.getResponseHeaders())
+            .setLoadDurationMs(loadDurationMs)
+            .setBytesLoaded(loadable.bytesLoaded())
+            .build();
     loadErrorHandlingPolicy.onLoadTaskConcluded(loadable.loadTaskId);
     mediaSourceEventDispatcher.loadCanceled(
         loadEventInfo,
@@ -568,14 +578,12 @@ public class ChunkSampleStream<T extends ChunkSource>
     boolean cancelable =
         bytesLoaded == 0 || !isMediaChunk || !haveReadFromMediaChunk(lastChunkIndex);
     LoadEventInfo loadEventInfo =
-        new LoadEventInfo(
-            loadable.loadTaskId,
-            loadable.dataSpec,
-            loadable.getUri(),
-            loadable.getResponseHeaders(),
-            elapsedRealtimeMs,
-            loadDurationMs,
-            bytesLoaded);
+        new LoadEventInfo.Builder(loadable.loadTaskId, loadable.dataSpec, elapsedRealtimeMs)
+            .setUri(loadable.getUri())
+            .setResponseHeaders(loadable.getResponseHeaders())
+            .setLoadDurationMs(loadDurationMs)
+            .setBytesLoaded(bytesLoaded)
+            .build();
     MediaLoadData mediaLoadData =
         new MediaLoadData(
             loadable.type,
@@ -657,7 +665,11 @@ public class ChunkSampleStream<T extends ChunkSource>
     @Nullable Chunk loadable = nextChunkHolder.chunk;
     nextChunkHolder.clear();
 
-    if (endOfStream) {
+    boolean nextChunkBeyondEndPositionUs =
+        loadable != null
+            && endPositionUs != C.TIME_END_OF_SOURCE
+            && loadable.startTimeUs >= endPositionUs;
+    if (endOfStream || nextChunkBeyondEndPositionUs) {
       pendingResetPositionUs = C.TIME_UNSET;
       loadingFinished = true;
       return true;
@@ -724,7 +736,8 @@ public class ChunkSampleStream<T extends ChunkSource>
         // Can't cancel anymore because the renderers have read from this chunk.
         return;
       }
-      if (chunkSource.shouldCancelLoad(positionUs, loadingChunk, readOnlyMediaChunks)) {
+      if ((endPositionUs != C.TIME_END_OF_SOURCE && loadingChunk.startTimeUs >= endPositionUs)
+          || chunkSource.shouldCancelLoad(positionUs, loadingChunk, readOnlyMediaChunks)) {
         loader.cancelLoading();
         if (isMediaChunk(loadingChunk)) {
           canceledMediaChunk = (BaseMediaChunk) loadingChunk;
@@ -733,12 +746,21 @@ public class ChunkSampleStream<T extends ChunkSource>
       return;
     }
 
-    int preferredQueueSize = chunkSource.getPreferredQueueSize(positionUs, readOnlyMediaChunks);
+    int preferredQueueSize =
+        min(mediaChunks.size(), chunkSource.getPreferredQueueSize(positionUs, readOnlyMediaChunks));
+    boolean discardedDataBeyondEndPositionUs = false;
+    if (endPositionUs != C.TIME_END_OF_SOURCE) {
+      while (preferredQueueSize > 0
+          && mediaChunks.get(preferredQueueSize - 1).startTimeUs >= endPositionUs) {
+        preferredQueueSize--;
+        discardedDataBeyondEndPositionUs = true;
+      }
+    }
     if (preferredQueueSize < mediaChunks.size()) {
       discardUpstream(preferredQueueSize);
     }
-
-    if (primarySampleQueue.hasQueuedTimestampsUpToReadEndTimeUs()) {
+    if (discardedDataBeyondEndPositionUs) {
+      pendingResetPositionUs = C.TIME_UNSET;
       loadingFinished = true;
     }
   }
@@ -758,12 +780,30 @@ public class ChunkSampleStream<T extends ChunkSource>
    *
    * @return Whether the stream had an initial discontinuity.
    */
+  // TODO: b/510217604 - Remove this method.
   public boolean consumeInitialDiscontinuity() {
     try {
       return hasInitialDiscontinuity;
     } finally {
       hasInitialDiscontinuity = false;
     }
+  }
+
+  /**
+   * Sets whether {@link #mayHaveInitialDiscontinuity()} should block on a pending initial
+   * discontinuity that has not yet been consumed by {@link #consumeInitialDiscontinuity()}.
+   */
+  // TODO: b/510217604 - Remove this method.
+  public void setUsesStreamPrerollFlags() {
+    this.usesStreamPrerollFlags = true;
+  }
+
+  @Override
+  public @Flags int getFlags() {
+    if (needToEvaluateInitialDiscontinuity) {
+      return FLAG_MAYBE_HAS_PREROLL;
+    }
+    return hasInitialDiscontinuity ? FLAG_HAS_PREROLL : 0;
   }
 
   /**

@@ -20,6 +20,7 @@ import static android.os.Build.VERSION.SDK_INT;
 import static androidx.media3.test.utils.AssetInfo.MP4_ASSET_COLOR_TEST_1080P_HLG10;
 import static androidx.media3.test.utils.AssetInfo.MP4_ASSET_WITH_INCREASING_TIMESTAMPS;
 import static androidx.media3.test.utils.AssetInfo.MP4_ASSET_WITH_INCREASING_TIMESTAMPS_320W_240H_15S;
+import static androidx.media3.test.utils.AssetInfo.MP4_TRIM_OPTIMIZATION_270;
 import static androidx.media3.test.utils.BitmapPixelTestUtil.maybeSaveTestBitmap;
 import static androidx.media3.test.utils.BitmapPixelTestUtil.readBitmap;
 import static androidx.media3.test.utils.FormatSupportAssumptions.assumeFormatsSupported;
@@ -41,10 +42,14 @@ import androidx.media3.common.MimeTypes;
 import androidx.media3.common.util.Log;
 import androidx.media3.common.util.Util;
 import androidx.media3.effect.DefaultHardwareBufferEffectsPipeline;
+import androidx.media3.effect.SimpleGlFrameProcessor;
+import androidx.media3.effect.ndk.HardwareBufferJni;
 import androidx.media3.inspector.frame.FrameExtractor;
-import androidx.media3.transformer.AndroidTestUtil;
+import androidx.media3.transformer.AndroidTestUtil.ForceEncodeEncoderFactory;
 import androidx.media3.transformer.EditedMediaItem;
 import androidx.media3.transformer.ExportTestResult;
+import androidx.media3.transformer.FrameWriterToHardwareBufferFrameQueueAdapter;
+import androidx.media3.transformer.PacketConsumerToFrameProcessorAdapter;
 import androidx.media3.transformer.Transformer;
 import androidx.media3.transformer.TransformerAndroidTestRunner;
 import androidx.test.core.app.ApplicationProvider;
@@ -67,21 +72,28 @@ import org.junit.runners.Parameterized.Parameters;
 /** Checks transcoding quality. */
 @Ignore("Only intended to run on internal infra: b/396671260")
 @RunWith(Parameterized.class)
+@SdkSuppress(minSdkVersion = 26)
 public final class TranscodeQualityTest {
   private static final String TAG = "TranscodeQualityTest";
 
   private static final String ORIGINAL_HLG10_PNG_ASSET_PATH =
       "test-generated-goldens/FrameExtractorTest/hlg10-color-test_0.000.png";
+  private static final String EXPECTED_ROTATED_VIDEO_EXTRACTED_PNG_PATH =
+      "test-generated-goldens/FrameExtractorTest/internal_emulator_transformer_output_270_rotated_0.000.png";
 
   private static final String LEGACY = "legacy";
-  private static final String PACKET_CONSUMER = "packet_consumer";
+  private static final String PACKET_CONSUMER_NDK = "packet_consumer_ndk";
+  private static final String FRAME_PROCESSOR_ADAPTER_NDK = "frame_processor_adapter_ndk";
+  private static final String FRAME_PROCESSOR_NDK = "frame_processor_ndk";
+  private static final int FRAME_PROCESSOR_MIN_SDK = 28;
 
   @Rule public final TestName testName = new TestName();
 
   @Parameters(name = "{0}")
   public static ImmutableList<String> params() {
-    if (SDK_INT >= 34) {
-      return ImmutableList.of(LEGACY, PACKET_CONSUMER);
+    if (SDK_INT >= FRAME_PROCESSOR_MIN_SDK) {
+      return ImmutableList.of(
+          LEGACY, PACKET_CONSUMER_NDK, FRAME_PROCESSOR_ADAPTER_NDK, FRAME_PROCESSOR_NDK);
     }
     return ImmutableList.of(LEGACY);
   }
@@ -124,9 +136,7 @@ public final class TranscodeQualityTest {
             .run(testId, editedMediaItem);
 
     maybeSaveResultFile(result);
-    if (result.ssim != ExportTestResult.SSIM_UNSET) {
-      assertThat(result.ssim).isGreaterThan(0.90);
-    }
+    assertThat(result.ssim).isGreaterThan(0.90);
   }
 
   @Test
@@ -141,10 +151,9 @@ public final class TranscodeQualityTest {
     Transformer transformer =
         builder
             .setVideoMimeType(MimeTypes.VIDEO_H264)
-            .setEncoderFactory(new AndroidTestUtil.ForceEncodeEncoderFactory(context))
+            .setEncoderFactory(new ForceEncodeEncoderFactory(context))
             .build();
-    MediaItem mediaItem =
-        MediaItem.fromUri(Uri.parse(MP4_ASSET_WITH_INCREASING_TIMESTAMPS_320W_240H_15S.uri));
+    MediaItem mediaItem = MediaItem.fromUri(MP4_ASSET_WITH_INCREASING_TIMESTAMPS_320W_240H_15S.uri);
     EditedMediaItem editedMediaItem =
         new EditedMediaItem.Builder(mediaItem).setRemoveAudio(true).build();
 
@@ -155,15 +164,18 @@ public final class TranscodeQualityTest {
             .run(testId, editedMediaItem);
 
     maybeSaveResultFile(result);
-    if (result.ssim != ExportTestResult.SSIM_UNSET) {
-      assertThat(result.ssim).isGreaterThan(0.90);
-    }
+    assertThat(result.ssim).isGreaterThan(0.90);
   }
 
   @Test
   @SdkSuppress(minSdkVersion = 34) // HDR Bitmap extraction requires API 34+.
   public void transcode_hlg10_outputsHlg() throws Exception {
     Context context = ApplicationProvider.getApplicationContext();
+    // TODO: b/286211012 - Enable once DefaultHardwareBufferEffectsPipeline supports HDR.
+    assumeFalse(
+        mode.equals(PACKET_CONSUMER_NDK)
+            || mode.equals(FRAME_PROCESSOR_ADAPTER_NDK)
+            || mode.equals(FRAME_PROCESSOR_NDK));
     assumeDeviceSupportsHdrEditing(testId, MP4_ASSET_COLOR_TEST_1080P_HLG10.videoFormat);
     assumeFormatsSupported(
         context,
@@ -173,8 +185,8 @@ public final class TranscodeQualityTest {
 
     Transformer.Builder builder = createBuilder(context, mode);
     Transformer transformer =
-        builder.setEncoderFactory(new AndroidTestUtil.ForceEncodeEncoderFactory(context)).build();
-    MediaItem mediaItem = MediaItem.fromUri(Uri.parse(MP4_ASSET_COLOR_TEST_1080P_HLG10.uri));
+        builder.setEncoderFactory(new ForceEncodeEncoderFactory(context)).build();
+    MediaItem mediaItem = MediaItem.fromUri(MP4_ASSET_COLOR_TEST_1080P_HLG10.uri);
     EditedMediaItem editedMediaItem =
         new EditedMediaItem.Builder(mediaItem).setRemoveAudio(true).build();
 
@@ -199,10 +211,65 @@ public final class TranscodeQualityTest {
     }
   }
 
+  @Test
+  public void transcode_rotated270_outputsRotated270() throws Exception {
+    Context context = ApplicationProvider.getApplicationContext();
+    // TODO: b/530927743 - Enable after rotation handling is fixed.
+    assumeFalse(mode.equals(FRAME_PROCESSOR_NDK));
+    assumeFormatsSupported(
+        context,
+        testId,
+        /* inputFormat= */ MP4_TRIM_OPTIMIZATION_270.videoFormat,
+        /* outputFormat= */ MP4_TRIM_OPTIMIZATION_270.videoFormat);
+
+    Transformer.Builder builder = createBuilder(context, mode);
+    Transformer transformer =
+        builder.setEncoderFactory(new ForceEncodeEncoderFactory(context)).build();
+    MediaItem mediaItem = MediaItem.fromUri(MP4_TRIM_OPTIMIZATION_270.uri);
+    EditedMediaItem editedMediaItem =
+        new EditedMediaItem.Builder(mediaItem).setRemoveAudio(true).build();
+
+    ExportTestResult result =
+        new TransformerAndroidTestRunner.Builder(context, transformer)
+            .build()
+            .run(testId, editedMediaItem);
+
+    maybeSaveResultFile(result);
+    try (FrameExtractor frameExtractor =
+        new FrameExtractor.Builder(context, MediaItem.fromUri(result.filePath)).build()) {
+      Bitmap actualFirstFrame =
+          frameExtractor.getFrame(/* positionMs= */ 0).get(/* timeout= */ 10, SECONDS).bitmap;
+      maybeSaveTestBitmap(testId, /* bitmapLabel= */ "actual", actualFirstFrame, /* path= */ null);
+      Bitmap expectedBitmap = readBitmap(EXPECTED_ROTATED_VIDEO_EXTRACTED_PNG_PATH);
+      assertBitmapsAreSimilar(expectedBitmap, actualFirstFrame, 25f);
+    }
+  }
+
   private static Transformer.Builder createBuilder(Context context, String mode) {
-    if (mode.equals(PACKET_CONSUMER)) {
+    if (SDK_INT < FRAME_PROCESSOR_MIN_SDK) {
+      return new Transformer.Builder(context);
+    }
+    if (mode.equals(PACKET_CONSUMER_NDK)) {
       return new Transformer.Builder(context)
-          .setHardwareBufferEffectsPipeline(new DefaultHardwareBufferEffectsPipeline());
+          .setNativeHardwareBufferHelpers(HardwareBufferJni.INSTANCE)
+          .setHardwareBufferEffectsPipeline(
+              DefaultHardwareBufferEffectsPipeline.create(context, HardwareBufferJni.INSTANCE));
+    } else if (mode.equals(FRAME_PROCESSOR_ADAPTER_NDK)) {
+      DefaultHardwareBufferEffectsPipeline pipeline =
+          DefaultHardwareBufferEffectsPipeline.create(context, HardwareBufferJni.INSTANCE);
+      return new Transformer.Builder(context)
+          .setNativeHardwareBufferHelpers(HardwareBufferJni.INSTANCE)
+          .setFrameProcessorFactory(
+              (output, listenerExecutor, listener) -> {
+                pipeline.setRenderOutput(new FrameWriterToHardwareBufferFrameQueueAdapter(output));
+                return new PacketConsumerToFrameProcessorAdapter(
+                    pipeline, listenerExecutor, listener);
+              });
+    } else if (mode.equals(FRAME_PROCESSOR_NDK)) {
+      return new Transformer.Builder(context)
+          .setNativeHardwareBufferHelpers(HardwareBufferJni.INSTANCE)
+          .setFrameProcessorFactory(
+              new SimpleGlFrameProcessor.Factory(context, HardwareBufferJni.INSTANCE));
     }
     return new Transformer.Builder(context);
   }

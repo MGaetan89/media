@@ -76,12 +76,92 @@ public class HlsMultivariantPlaylistParserTest {
           + "CODECS=\"mp4a.40.2 , avc1.66.30 \"\n"
           + "http://example.com/spaces_in_codecs.m3u8\n";
 
+  private static final String PLAYLIST_WITH_SCORE =
+      " #EXTM3U \n"
+          + "#EXT-X-STREAM-INF:BANDWIDTH=1280000,CODECS=\"avc1.66.30\","
+          + "RESOLUTION=304x128,SCORE=1.5\n"
+          + "http://example.com/low.m3u8\n"
+          + "#EXT-X-STREAM-INF:BANDWIDTH=8940000,CODECS=\"avc1.66.30\","
+          + "RESOLUTION=1920x1080,SCORE=2.0\n"
+          + "http://example.com/high.m3u8\n";
+
   private static final String PLAYLIST_WITH_DOLBY_VISION =
       " #EXTM3U \n"
           + "\n"
           + "#EXT-X-STREAM-INF:BANDWIDTH=8500000,AVERAGE-BANDWIDTH=6000000,"
           + "CODECS=\"dvh1.10.05\",RESOLUTION=1920x1080,VIDEO-RANGE=PQ\n"
           + "http://example.com/high_hdr.m3u8\n";
+
+  private static final String PLAYLIST_WITH_CONTENT_STEERING_INFO_ABSOLUTE_SERVER_URI =
+      " #EXTM3U \n"
+          + "\n"
+          + "#EXT-X-CONTENT-STEERING:SERVER-URI=\"https://test.com/steering?video=001\",PATHWAY-ID=\"CDN-A\"\n"
+          + "\n"
+          + "#EXT-X-STREAM-INF:BANDWIDTH=1280000,CODECS=\"mp4a.40.2,avc1.66.30\",RESOLUTION=304x128,PATHWAY-ID=\"CDN-A\",STABLE-VARIANT-ID=\"Video1\"\n"
+          + "http://example.com/low.m3u8\n"
+          + "\n"
+          + "#EXT-X-STREAM-INF:BANDWIDTH=1280000,CODECS=\"mp4a.40.2,avc1.66.30\",RESOLUTION=304x128,PATHWAY-ID=\"CDN-B\",STABLE-VARIANT-ID=\"Video1\"\n"
+          + "http://backup.example.com/low.m3u8\n";
+
+  private static final String PLAYLIST_WITH_CONTENT_STEERING_INFO_RELATIVE_SERVER_URI =
+      " #EXTM3U \n"
+          + "\n"
+          + "#EXT-X-CONTENT-STEERING:SERVER-URI=\"/steering?video=001\",PATHWAY-ID=\"CDN-A\"\n"
+          + "\n"
+          + "#EXT-X-STREAM-INF:BANDWIDTH=1280000,CODECS=\"mp4a.40.2,avc1.66.30\",RESOLUTION=304x128,PATHWAY-ID=\"CDN-A\",STABLE-VARIANT-ID=\"Video1\"\n"
+          + "http://example.com/low.m3u8\n"
+          + "\n"
+          + "#EXT-X-STREAM-INF:BANDWIDTH=1280000,CODECS=\"mp4a.40.2,avc1.66.30\",RESOLUTION=304x128,PATHWAY-ID=\"CDN-B\",STABLE-VARIANT-ID=\"Video1\"\n"
+          + "http://backup.example.com/low.m3u8\n";
+
+  private static final String PLAYLIST_WITH_CONTENT_STEERING_AND_VARIABLE_SUBSTITUTION =
+      " #EXTM3U \n"
+          + "\n"
+          + "#EXT-X-DEFINE:NAME=\"steering_path\",VALUE=\"/steering?video=001\"\n"
+          + "#EXT-X-DEFINE:NAME=\"cdn_id\",VALUE=\"CDN-A\"\n"
+          + "\n"
+          + "#EXT-X-CONTENT-STEERING:SERVER-URI=\"{$steering_path}\",PATHWAY-ID=\"{$cdn_id}\"\n"
+          + "\n"
+          + "#EXT-X-STREAM-INF:BANDWIDTH=1280000,CODECS=\"mp4a.40.2,avc1.66.30\",RESOLUTION=304x128,PATHWAY-ID=\"CDN-A\",STABLE-VARIANT-ID=\"Video1\"\n"
+          + "http://example.com/low.m3u8\n"
+          + "\n"
+          + "#EXT-X-STREAM-INF:BANDWIDTH=1280000,CODECS=\"mp4a.40.2,avc1.66.30\",RESOLUTION=304x128,PATHWAY-ID=\"CDN-B\",STABLE-VARIANT-ID=\"Video1\"\n"
+          + "http://backup.example.com/low.m3u8\n";
+
+  private static final String PLAYLIST_WITH_CONTENT_STEERING_INFO_NO_INITIAL_PATHWAY_ID =
+      " #EXTM3U \n"
+          + "\n"
+          + "#EXT-X-CONTENT-STEERING:SERVER-URI=\"/steering?video=001\"\n"
+          + "\n"
+          + "#EXT-X-STREAM-INF:BANDWIDTH=1280000,CODECS=\"mp4a.40.2,avc1.66.30\",RESOLUTION=304x128,PATHWAY-ID=\"CDN-A\",STABLE-VARIANT-ID=\"Video1\"\n"
+          + "http://example.com/low.m3u8\n"
+          + "\n"
+          + "#EXT-X-STREAM-INF:BANDWIDTH=1280000,CODECS=\"mp4a.40.2,avc1.66.30\",RESOLUTION=304x128,PATHWAY-ID=\"CDN-B\",STABLE-VARIANT-ID=\"Video1\"\n"
+          + "http://backup.example.com/low.m3u8\n";
+
+  private static final String PLAYLIST_WITH_CONTENT_STEERING_INFO_NO_SERVER_URI =
+      " #EXTM3U \n"
+          + "\n"
+          + "#EXT-X-CONTENT-STEERING:PATHWAY-ID=\"CDN-A\"\n"
+          + "\n"
+          + "#EXT-X-STREAM-INF:BANDWIDTH=1280000,CODECS=\"mp4a.40.2,avc1.66.30\",RESOLUTION=304x128,PATHWAY-ID=\"CDN-A\",STABLE-VARIANT-ID=\"Video1\"\n"
+          + "http://example.com/low.m3u8\n"
+          + "\n"
+          + "#EXT-X-STREAM-INF:BANDWIDTH=1280000,CODECS=\"mp4a.40.2,avc1.66.30\",RESOLUTION=304x128,PATHWAY-ID=\"CDN-B\",STABLE-VARIANT-ID=\"Video1\"\n"
+          + "http://backup.example.com/low.m3u8\n";
+
+  private static final String PLAYLIST_WITH_CONTENT_STEERING_INFO_APPEARING_TWICE =
+      " #EXTM3U \n"
+          + "\n"
+          + "#EXT-X-CONTENT-STEERING:SERVER-URI=\"/steering?video=001\",PATHWAY-ID=\"CDN-A\"\n"
+          + "\n"
+          + "#EXT-X-CONTENT-STEERING:SERVER-URI=\"/steering?video=001\",PATHWAY-ID=\"CDN-B\"\n"
+          + "\n"
+          + "#EXT-X-STREAM-INF:BANDWIDTH=1280000,CODECS=\"mp4a.40.2,avc1.66.30\",RESOLUTION=304x128,PATHWAY-ID=\"CDN-A\",STABLE-VARIANT-ID=\"Video1\"\n"
+          + "http://example.com/low.m3u8\n"
+          + "\n"
+          + "#EXT-X-STREAM-INF:BANDWIDTH=1280000,CODECS=\"mp4a.40.2,avc1.66.30\",RESOLUTION=304x128,PATHWAY-ID=\"CDN-B\",STABLE-VARIANT-ID=\"Video1\"\n"
+          + "http://backup.example.com/low.m3u8\n";
 
   private static final String PLAYLIST_WITH_PATHWAY_ID_AND_STABLE_VARIANT_ID =
       " #EXTM3U \n"
@@ -310,6 +390,15 @@ public class HlsMultivariantPlaylistParserTest {
           + "8940000/index.m3u8\n"
           + "#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=1313400,RESOLUTION=1920x1080,CODECS=\"avc1.640028\",URI=\"iframe_1313400/index.m3u8\"\n";
 
+  private static final String PLAYLIST_WITH_IFRAME_VARIANT_SCORE =
+      "#EXTM3U\n"
+          + "#EXT-X-STREAM-INF:BANDWIDTH=8940000,RESOLUTION=1920x1080,"
+          + "CODECS=\"avc1.640028\"\n"
+          + "8940000/index.m3u8\n"
+          + "#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=1313400,SCORE=4.5,"
+          + "RESOLUTION=1920x1080,CODECS=\"avc1.640028\","
+          + "URI=\"iframe_1313400/index.m3u8\"\n";
+
   @Test
   public void parseMultivariantPlaylist_withSimple_success() throws IOException {
     HlsMultivariantPlaylist multivariantPlaylist =
@@ -360,6 +449,19 @@ public class HlsMultivariantPlaylistParserTest {
     assertThat(variants.get(4).url).isEqualTo(Uri.parse("http://example.com/audio-only.m3u8"));
     assertThat(variants.get(4).pathwayId).isNull();
     assertThat(variants.get(4).stableVariantId).isNull();
+
+    assertThat(multivariantPlaylist.contentSteeringInfo).isNull();
+  }
+
+  @Test
+  public void parseMultivariantPlaylist_withoutScore_setsSelectionPriorityToNoValue()
+      throws IOException {
+    HlsMultivariantPlaylist multivariantPlaylist =
+        parseMultivariantPlaylist(PLAYLIST_URI, PLAYLIST_SIMPLE);
+
+    for (HlsMultivariantPlaylist.Variant variant : multivariantPlaylist.variants) {
+      assertThat(variant.format.selectionPriority).isEqualTo((float) Format.NO_VALUE);
+    }
   }
 
   @Test
@@ -374,6 +476,16 @@ public class HlsMultivariantPlaylistParserTest {
   }
 
   @Test
+  public void parseMultivariantPlaylist_withScore_success() throws IOException {
+    HlsMultivariantPlaylist multivariantPlaylist =
+        parseMultivariantPlaylist(PLAYLIST_URI, PLAYLIST_WITH_SCORE);
+
+    List<HlsMultivariantPlaylist.Variant> variants = multivariantPlaylist.variants;
+    assertThat(variants.get(0).format.selectionPriority).isEqualTo(1.5f);
+    assertThat(variants.get(1).format.selectionPriority).isEqualTo(2.0f);
+  }
+
+  @Test
   public void parseMultivariantPlaylist_withDolbyVisionProfile10_success() throws IOException {
     HlsMultivariantPlaylist multivariantPlaylist =
         parseMultivariantPlaylist(PLAYLIST_URI, PLAYLIST_WITH_DOLBY_VISION);
@@ -384,6 +496,88 @@ public class HlsMultivariantPlaylistParserTest {
     assertThat(variants.get(0).format.colorInfo.colorSpace).isEqualTo(C.COLOR_SPACE_BT2020);
     assertThat(variants.get(0).format.colorInfo.colorTransfer).isEqualTo(C.COLOR_TRANSFER_ST2084);
     assertThat(variants.get(0).format.colorInfo.colorRange).isEqualTo(C.COLOR_RANGE_FULL);
+  }
+
+  @Test
+  public void parseMultivariantPlaylist_hasContentSteeringInfoWithAbsoluteServerUri_success()
+      throws IOException {
+    HlsMultivariantPlaylist multivariantPlaylist =
+        parseMultivariantPlaylist(
+            PLAYLIST_URI, PLAYLIST_WITH_CONTENT_STEERING_INFO_ABSOLUTE_SERVER_URI);
+
+    assertThat(multivariantPlaylist.contentSteeringInfo).isNotNull();
+    HlsMultivariantPlaylist.ContentSteeringInfo contentSteeringInfo =
+        multivariantPlaylist.contentSteeringInfo;
+    assertThat(contentSteeringInfo.serverUri)
+        .isEqualTo(Uri.parse("https://test.com/steering?video=001"));
+    assertThat(contentSteeringInfo.pathwayId).isEqualTo("CDN-A");
+  }
+
+  @Test
+  public void parseMultivariantPlaylist_hasContentSteeringInfoWithRelativeServerUri_success()
+      throws IOException {
+    HlsMultivariantPlaylist multivariantPlaylist =
+        parseMultivariantPlaylist(
+            PLAYLIST_URI, PLAYLIST_WITH_CONTENT_STEERING_INFO_RELATIVE_SERVER_URI);
+
+    assertThat(multivariantPlaylist.contentSteeringInfo).isNotNull();
+    HlsMultivariantPlaylist.ContentSteeringInfo contentSteeringInfo =
+        multivariantPlaylist.contentSteeringInfo;
+    assertThat(contentSteeringInfo.serverUri)
+        .isEqualTo(Uri.parse("https://example.com/steering?video=001"));
+    assertThat(contentSteeringInfo.pathwayId).isEqualTo("CDN-A");
+  }
+
+  @Test
+  public void parseMultivariantPlaylist_contentSteeringWithVariableSubstitution_success()
+      throws IOException {
+    HlsMultivariantPlaylist multivariantPlaylist =
+        parseMultivariantPlaylist(
+            PLAYLIST_URI, PLAYLIST_WITH_CONTENT_STEERING_AND_VARIABLE_SUBSTITUTION);
+
+    assertThat(multivariantPlaylist.contentSteeringInfo).isNotNull();
+    HlsMultivariantPlaylist.ContentSteeringInfo contentSteeringInfo =
+        multivariantPlaylist.contentSteeringInfo;
+    assertThat(contentSteeringInfo.serverUri)
+        .isEqualTo(Uri.parse("https://example.com/steering?video=001"));
+    assertThat(contentSteeringInfo.pathwayId).isEqualTo("CDN-A");
+  }
+
+  @Test
+  public void parseMultivariantPlaylist_hasContentSteeringInfoNoInitialPathwayId_success()
+      throws IOException {
+    HlsMultivariantPlaylist multivariantPlaylist =
+        parseMultivariantPlaylist(
+            PLAYLIST_URI, PLAYLIST_WITH_CONTENT_STEERING_INFO_NO_INITIAL_PATHWAY_ID);
+
+    assertThat(multivariantPlaylist.contentSteeringInfo).isNotNull();
+    HlsMultivariantPlaylist.ContentSteeringInfo contentSteeringInfo =
+        multivariantPlaylist.contentSteeringInfo;
+    assertThat(contentSteeringInfo.serverUri)
+        .isEqualTo(Uri.parse("https://example.com/steering?video=001"));
+    assertThat(contentSteeringInfo.pathwayId).isNull();
+  }
+
+  @Test
+  public void parseMultivariantPlaylist_contentSteeringInfoNoServerUri_throwsException() {
+    assertThrows(
+        ParserException.class,
+        () ->
+            parseMultivariantPlaylist(
+                PLAYLIST_URI, PLAYLIST_WITH_CONTENT_STEERING_INFO_NO_SERVER_URI));
+  }
+
+  @Test
+  public void parseMultivariantPlaylist_contentSteeringInfoAppearingTwice_throwsException() {
+    ParserException exception =
+        assertThrows(
+            ParserException.class,
+            () ->
+                parseMultivariantPlaylist(
+                    PLAYLIST_URI, PLAYLIST_WITH_CONTENT_STEERING_INFO_APPEARING_TWICE));
+    assertThat(exception)
+        .hasMessageThat()
+        .contains("#EXT-X-CONTENT-STEERING tag must not appear more than once");
   }
 
   @Test
@@ -735,6 +929,17 @@ public class HlsMultivariantPlaylistParserTest {
     assertThat(iFramesOnlyVariant.format.bitrate).isEqualTo(1313400);
     assertThat(iFramesOnlyVariant.format.roleFlags & C.ROLE_FLAG_TRICK_PLAY)
         .isEqualTo(C.ROLE_FLAG_TRICK_PLAY);
+  }
+
+  @Test
+  public void parseMultivariantPlaylist_withIFrameStreamInfScore_success() throws IOException {
+    HlsMultivariantPlaylist playlist =
+        parseMultivariantPlaylist(PLAYLIST_URI, PLAYLIST_WITH_IFRAME_VARIANT_SCORE);
+
+    assertThat(playlist.variants).hasSize(2);
+    assertThat(playlist.variants.get(0).format.selectionPriority)
+        .isEqualTo((float) Format.NO_VALUE);
+    assertThat(playlist.variants.get(1).format.selectionPriority).isEqualTo(4.5f);
   }
 
   private static Metadata createExtXStreamInfMetadata(HlsTrackMetadataEntry.VariantInfo... infos) {

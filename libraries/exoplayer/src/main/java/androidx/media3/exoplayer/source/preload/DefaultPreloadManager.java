@@ -97,8 +97,22 @@ public final class DefaultPreloadManager
     public Builder(
         Context context,
         TargetPreloadStatusControl<Integer, PreloadStatus> targetPreloadStatusControl) {
+      this(context, new SimpleRankingDataComparator(), targetPreloadStatusControl);
+    }
+
+    /**
+     * Creates a builder.
+     *
+     * @param context A {@link Context}.
+     * @param rankingDataComparator A {@link SimpleRankingDataComparator}.
+     * @param targetPreloadStatusControl A {@link TargetPreloadStatusControl}.
+     */
+    public Builder(
+        Context context,
+        SimpleRankingDataComparator rankingDataComparator,
+        TargetPreloadStatusControl<Integer, PreloadStatus> targetPreloadStatusControl) {
       super(
-          new SimpleRankingDataComparator(),
+          rankingDataComparator,
           targetPreloadStatusControl,
           new DefaultMediaSourceFactorySupplier(context));
       this.context = context;
@@ -256,10 +270,12 @@ public final class DefaultPreloadManager
      * @return This builder.
      * @throws IllegalStateException If {@link #build()}, {@link #buildExoPlayer()} or {@link
      *     #buildExoPlayer(ExoPlayer.Builder)} has already been called.
+     * @throws IllegalArgumentException If {@code bandwidthMeter} is {@link BandwidthMeter#NO_OP}.
      */
     @CanIgnoreReturnValue
     public Builder setBandwidthMeter(BandwidthMeter bandwidthMeter) {
       checkState(!buildCalled && !buildExoPlayerCalled);
+      checkArgument(bandwidthMeter != BandwidthMeter.NO_OP);
       this.bandwidthMeterSupplier = () -> bandwidthMeter;
       return this;
     }
@@ -556,6 +572,62 @@ public final class DefaultPreloadManager
     }
   }
 
+  /**
+   * A {@link RankingDataComparator} which compares the ranks of the media items based on their
+   * distances to the {@linkplain #setCurrentPlayingIndex(int) index of current playing media item}.
+   */
+  public static class SimpleRankingDataComparator implements RankingDataComparator<Integer> {
+
+    private int currentPlayingIndex;
+    @Nullable private InvalidationListener invalidationListener;
+
+    /** Creates a {@link SimpleRankingDataComparator}. */
+    public SimpleRankingDataComparator() {
+      this.currentPlayingIndex = C.INDEX_UNSET;
+    }
+
+    @Override
+    public final void setInvalidationListener(@Nullable InvalidationListener invalidationListener) {
+      this.invalidationListener = invalidationListener;
+    }
+
+    /**
+     * Sets the index of the current playing media.
+     *
+     * @param currentPlayingIndex The index of current playing media.
+     */
+    public final void setCurrentPlayingIndex(int currentPlayingIndex) {
+      if (currentPlayingIndex != this.currentPlayingIndex) {
+        this.currentPlayingIndex = currentPlayingIndex;
+        if (invalidationListener != null) {
+          invalidationListener.onRankingDataComparatorInvalidated();
+        }
+      }
+    }
+
+    /**
+     * Compares the ranks of two media items based on their distances to the current playing index.
+     * The media item with lower rank will be preloaded earlier than the other. If the ranks of the
+     * two media items are equal, the relative preload order of them is arbitrary.
+     *
+     * <p>Apps can override this method if a more fine-tuned comparison logic is needed.
+     *
+     * @param o1 The index of the first media item to be compared.
+     * @param o2 The index of the second media item to be compared.
+     * @return A negative integer, zero, or a positive integer as the rank of the first media item
+     *     is less than, equal to, or greater than the second.
+     */
+    @Override
+    public int compare(Integer o1, Integer o2) {
+      return Integer.compare(abs(o1 - currentPlayingIndex), abs(o2 - currentPlayingIndex));
+    }
+
+    /** Returns the index of the current playing media, or {@link C#INDEX_UNSET} if not set. */
+    protected final int getCurrentPlayingIndex() {
+      return currentPlayingIndex;
+    }
+  }
+
   private final RendererCapabilitiesList rendererCapabilitiesList;
   private final TrackSelector trackSelector;
   private final PlaybackLooperProvider preloadLooperProvider;
@@ -567,7 +639,7 @@ public final class DefaultPreloadManager
 
   private DefaultPreloadManager(Builder builder) {
     super(
-        new SimpleRankingDataComparator(),
+        builder.rankingDataComparator,
         builder.targetPreloadStatusControl,
         builder.mediaSourceFactorySupplier.get());
     rendererCapabilitiesList =
@@ -576,7 +648,7 @@ public final class DefaultPreloadManager
     preloadLooperProvider = builder.preloadLooperProvider;
     trackSelector = builder.trackSelectorFactory.createTrackSelector(builder.context);
     BandwidthMeter bandwidthMeter = builder.bandwidthMeterSupplier.get();
-    trackSelector.init(() -> {}, bandwidthMeter);
+    trackSelector.init(trackSelector::onParametersActivated, bandwidthMeter);
     Looper preloadLooper = preloadLooperProvider.obtainLooper();
     preloadMediaSourceFactory =
         new PreloadMediaSource.Factory(
@@ -710,35 +782,6 @@ public final class DefaultPreloadManager
     }
   }
 
-  private static final class SimpleRankingDataComparator implements RankingDataComparator<Integer> {
-
-    private int currentPlayingIndex;
-    @Nullable private InvalidationListener invalidationListener;
-
-    public SimpleRankingDataComparator() {
-      this.currentPlayingIndex = C.INDEX_UNSET;
-    }
-
-    @Override
-    public int compare(Integer o1, Integer o2) {
-      return Integer.compare(abs(o1 - currentPlayingIndex), abs(o2 - currentPlayingIndex));
-    }
-
-    @Override
-    public void setInvalidationListener(@Nullable InvalidationListener invalidationListener) {
-      this.invalidationListener = invalidationListener;
-    }
-
-    public void setCurrentPlayingIndex(int currentPlayingIndex) {
-      if (currentPlayingIndex != this.currentPlayingIndex) {
-        this.currentPlayingIndex = currentPlayingIndex;
-        if (invalidationListener != null) {
-          invalidationListener.onRankingDataComparatorInvalidated();
-        }
-      }
-    }
-  }
-
   private final class PreCacheHelperListener implements PreCacheHelper.Listener {
 
     @Override
@@ -756,18 +799,15 @@ public final class DefaultPreloadManager
     }
 
     @Override
-    public void onPreCacheProgress(
-        MediaItem mediaItem, long contentLength, long bytesDownloaded, float percentageDownloaded) {
-      if (percentageDownloaded == 100f) {
-        PreloadStatus targetPreloadStatus = getTargetPreloadStatusIfCurrentlyPreloading(mediaItem);
-        if (targetPreloadStatus == null || !targetPreloadStatus.isPreCachingCategory()) {
-          // If the mediaItem is not the currently caching, skip silently as invalidate() must have
-          // been called, and a new sequence of preloading must have started.
-          return;
-        }
-        DefaultPreloadManager.this.onCompleted(
-            mediaItem, preloadStatus -> preloadStatus.equals(targetPreloadStatus));
+    public void onPreCacheCompleted(MediaItem mediaItem) {
+      PreloadStatus targetPreloadStatus = getTargetPreloadStatusIfCurrentlyPreloading(mediaItem);
+      if (targetPreloadStatus == null || !targetPreloadStatus.isPreCachingCategory()) {
+        // If the mediaItem is not the currently caching, skip silently as invalidate() must have
+        // been called, and a new sequence of preloading must have started.
+        return;
       }
+      DefaultPreloadManager.this.onCompleted(
+          mediaItem, preloadStatus -> preloadStatus.equals(targetPreloadStatus));
     }
 
     @Override

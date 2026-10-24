@@ -15,35 +15,41 @@
  */
 package androidx.media3.transformer;
 
+import static androidx.media3.common.C.TRACK_TYPE_VIDEO;
 import static androidx.media3.common.util.Util.isRunningOnEmulator;
-import static androidx.media3.transformer.CompositionAssetInfo.MULTI_SEQUENCE_IMAGE_CONFIGS;
-import static androidx.media3.transformer.CompositionAssetInfo.MULTI_SEQUENCE_MISMATCHED_DURATION_CONFIGS;
-import static androidx.media3.transformer.CompositionAssetInfo.MULTI_SEQUENCE_VIDEO_CONFIGS;
-import static androidx.media3.transformer.CompositionAssetInfo.SINGLE_SEQUENCE_CONFIGS;
+import static androidx.media3.test.utils.CompositionAssetInfo.MULTI_SEQUENCE_CONFIGS;
+import static androidx.media3.test.utils.CompositionAssetInfo.MULTI_SEQUENCE_VIDEO_CONFIGS;
+import static androidx.media3.test.utils.CompositionAssetInfo.SINGLE_SEQUENCE_CONFIGS;
 import static androidx.test.platform.app.InstrumentationRegistry.getInstrumentation;
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.TruthJUnit.assume;
 
 import android.content.Context;
 import android.view.SurfaceView;
+import androidx.annotation.RequiresApi;
 import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
-import androidx.media3.common.PlaybackException;
+import androidx.media3.common.Player;
 import androidx.media3.common.VideoGraph;
-import androidx.media3.effect.Frame;
 import androidx.media3.effect.GlEffect;
 import androidx.media3.effect.HardwareBufferFrame;
+import androidx.media3.effect.HardwareBufferFrameQueue;
 import androidx.media3.effect.MultipleInputVideoGraph;
-import androidx.media3.effect.PacketConsumer;
+import androidx.media3.effect.RenderingPacketConsumer;
 import androidx.media3.effect.SingleInputVideoGraph;
-import androidx.media3.test.utils.RecordingPacketConsumer;
+import androidx.media3.effect.ndk.HardwareBufferJni;
+import androidx.media3.test.utils.CompositionAssetInfo;
+import androidx.media3.test.utils.PlayerFence;
+import androidx.media3.test.utils.RecordingHardwareBufferEffectsPipeline;
 import androidx.test.ext.junit.rules.ActivityScenarioRule;
+import androidx.test.filters.SdkSuppress;
 import com.google.common.collect.ImmutableList;
+import com.google.common.util.concurrent.SettableFuture;
 import com.google.testing.junit.testparameterinjector.TestParameter;
 import com.google.testing.junit.testparameterinjector.TestParameterInjector;
 import com.google.testing.junit.testparameterinjector.TestParameterValuesProvider;
 import java.util.List;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.CopyOnWriteArrayList;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 import org.junit.After;
 import org.junit.Before;
@@ -64,7 +70,6 @@ public class CompositionPlayerParameterizedPlaybackTest {
   private final Context context = getInstrumentation().getContext().getApplicationContext();
 
   private @MonotonicNonNull CompositionPlayer player;
-  private @MonotonicNonNull PlayerTestListener playerTestListener;
   private @MonotonicNonNull SurfaceView surfaceView;
 
   private static class SingleInputVideoGraphConfigsProvider extends TestParameterValuesProvider {
@@ -81,8 +86,7 @@ public class CompositionPlayerParameterizedPlaybackTest {
         TestParameterValuesProvider.Context context) {
       return new ImmutableList.Builder<CompositionAssetInfo>()
           .addAll(SINGLE_SEQUENCE_CONFIGS)
-          .addAll(MULTI_SEQUENCE_IMAGE_CONFIGS)
-          .addAll(MULTI_SEQUENCE_MISMATCHED_DURATION_CONFIGS)
+          .addAll(MULTI_SEQUENCE_CONFIGS)
           .build();
     }
   }
@@ -91,11 +95,10 @@ public class CompositionPlayerParameterizedPlaybackTest {
     @Override
     protected List<CompositionAssetInfo> provideValues(
         TestParameterValuesProvider.Context context) {
-      // TODO: b/418785194 - Expand this once mismatched sequence lengths are supported.
       return new ImmutableList.Builder<CompositionAssetInfo>()
           .addAll(SINGLE_SEQUENCE_CONFIGS)
-          .addAll(MULTI_SEQUENCE_IMAGE_CONFIGS)
           .addAll(MULTI_SEQUENCE_VIDEO_CONFIGS)
+          .addAll(MULTI_SEQUENCE_CONFIGS)
           .build();
     }
   }
@@ -103,7 +106,6 @@ public class CompositionPlayerParameterizedPlaybackTest {
   @Before
   public void setup() {
     rule.getScenario().onActivity(activity -> surfaceView = activity.getSurfaceView());
-    playerTestListener = new PlayerTestListener(TEST_TIMEOUT_MS);
   }
 
   @After
@@ -179,6 +181,7 @@ public class CompositionPlayerParameterizedPlaybackTest {
   }
 
   @Test
+  @SdkSuppress(minSdkVersion = 28)
   public void playback_packetConsumer(
       @TestParameter(valuesProvider = FrameConsumerConfigsProvider.class)
           CompositionAssetInfo compositionAssetInfo)
@@ -189,47 +192,51 @@ public class CompositionPlayerParameterizedPlaybackTest {
         .withMessage("Skipped on emulator due to surface dropping frames")
         .that(isRunningOnEmulator())
         .isFalse();
-    RecordingPacketConsumer<ImmutableList<HardwareBufferFrame>> packetConsumer =
-        new RecordingPacketConsumer<>();
-    packetConsumer.setOnQueue(
-        (frames) -> {
-          for (HardwareBufferFrame frame : frames) {
-            frame.release(/* releaseFence= */ null);
-          }
-          return null;
-        });
+    List<ImmutableList<HardwareBufferFrame>> queuedPackets = new CopyOnWriteArrayList<>();
+    RecordingHardwareBufferEffectsPipeline pipeline =
+        RecordingHardwareBufferEffectsPipeline.create(
+            context,
+            HardwareBufferJni.INSTANCE,
+            (frames) -> {
+              queuedPackets.add(frames);
+              return frames;
+            });
     ImmutableList<Long> expectedVideoTimestampsUs =
         compositionAssetInfo.getExpectedVideoTimestampsUs();
 
     Composition composition = compositionAssetInfo.getComposition();
-    runCompositionPlayer(composition, /* packetConsumerFactory= */ () -> packetConsumer);
+    runCompositionPlayer(composition, pipeline);
 
-    List<ImmutableList<HardwareBufferFrame>> queuedPackets = packetConsumer.getQueuedPayloads();
     // TODO: b/449956936 - add EOS to CompositionPlayer packet consumer and wait until its received.
-    assertThat(queuedPackets.size()).isAtLeast(expectedVideoTimestampsUs.size() - 2);
-    for (int packetIndex = 0; packetIndex < queuedPackets.size(); packetIndex++) {
-      long presentationTimeUs = queuedPackets.get(packetIndex).get(0).presentationTimeUs;
-      assertThat(presentationTimeUs).isEqualTo(expectedVideoTimestampsUs.get(packetIndex));
-      assertThat(queuedPackets.get(0)).hasSize(composition.sequences.size());
-      for (int sequenceIndex = 0;
-          sequenceIndex < queuedPackets.get(packetIndex).size();
-          ++sequenceIndex) {
-        Frame.Metadata metadata = queuedPackets.get(packetIndex).get(sequenceIndex).getMetadata();
+
+    // Some decoders output an extra trailing decoded frame. Relax the check to verify that we
+    // received at least the expected N frames, at most N + 1 frames, and match the expected N
+    // timestamps.
+    int expectedFrameCount = expectedVideoTimestampsUs.size();
+    assertThat(queuedPackets.size()).isAnyOf(expectedFrameCount, expectedFrameCount + 1);
+    for (int packetIndex = 0; packetIndex < expectedFrameCount; packetIndex++) {
+      long sequencePresentationTimeUs =
+          queuedPackets.get(packetIndex).get(0).sequencePresentationTimeUs;
+      assertThat(sequencePresentationTimeUs).isEqualTo(expectedVideoTimestampsUs.get(packetIndex));
+      assertThat(queuedPackets.get(0)).hasSize(getNumVideoSequences(composition));
+      for (int i = 0; i < queuedPackets.get(packetIndex).size(); ++i) {
+        HardwareBufferFrame.Metadata metadata = queuedPackets.get(packetIndex).get(i).getMetadata();
         assertThat(metadata).isInstanceOf(CompositionFrameMetadata.class);
         CompositionFrameMetadata compositionFrameMetadata = (CompositionFrameMetadata) metadata;
-        assertThat(compositionFrameMetadata.sequenceIndex).isEqualTo(sequenceIndex);
+        int sequenceIndex = compositionFrameMetadata.sequenceIndex;
         // CompositionPlayer replaces TimestampAdjustment effects with InactiveTimestampAdjustment.
         // Assert on the non-edited MediaItem.
         MediaItem itemFromMetadata = itemFromMetadata(compositionFrameMetadata);
         MediaItem expectedItemAtTime =
-            expectedItemAtTime(composition, sequenceIndex, presentationTimeUs);
+            expectedItemAtTime(composition, sequenceIndex, sequencePresentationTimeUs);
         assertThat(itemFromMetadata).isEqualTo(expectedItemAtTime);
       }
     }
   }
 
   private void runCompositionPlayer(Composition composition, VideoGraph.Factory videoGraphFactory)
-      throws PlaybackException, TimeoutException {
+      throws Exception {
+    SettableFuture<Void> endedFuture = SettableFuture.create();
     getInstrumentation()
         .runOnMainSync(
             () -> {
@@ -241,35 +248,39 @@ public class CompositionPlayerParameterizedPlaybackTest {
               // Set a surface on the player even though there is no UI on this test. We need a
               // surface otherwise the player will skip/drop video frames.
               player.setVideoSurfaceView(surfaceView);
-              player.addListener(playerTestListener);
+              endedFuture.setFuture(futureWhen(player).entersPlaybackState(Player.STATE_ENDED));
               player.setComposition(composition);
               player.prepare();
               player.play();
             });
-    playerTestListener.waitUntilPlayerEnded();
+    endedFuture.get();
   }
 
+  @RequiresApi(28)
   private void runCompositionPlayer(
       Composition composition,
-      PacketConsumer.Factory<ImmutableList<HardwareBufferFrame>> packetConsumerFactory)
-      throws PlaybackException, TimeoutException {
+      RenderingPacketConsumer<ImmutableList<HardwareBufferFrame>, HardwareBufferFrameQueue>
+          hardwareBufferEffectsPipeline)
+      throws Exception {
+    SettableFuture<Void> endedFuture = SettableFuture.create();
     getInstrumentation()
         .runOnMainSync(
             () -> {
               player =
                   new CompositionPlayer.Builder(context)
-                      .setPacketConsumerFactory(packetConsumerFactory)
+                      .setNativeHardwareBufferHelpers(HardwareBufferJni.INSTANCE)
+                      .setHardwareBufferEffectsPipeline(hardwareBufferEffectsPipeline)
                       .experimentalSetLateThresholdToDropInputUs(C.TIME_UNSET)
                       .build();
               // Set a surface on the player even though there is no UI on this test. We need a
               // surface otherwise the player will skip/drop video frames.
               player.setVideoSurfaceView(surfaceView);
-              player.addListener(playerTestListener);
+              endedFuture.setFuture(futureWhen(player).entersPlaybackState(Player.STATE_ENDED));
               player.setComposition(composition);
               player.prepare();
               player.play();
             });
-    playerTestListener.waitUntilPlayerEnded();
+    endedFuture.get();
   }
 
   private static MediaItem itemFromMetadata(CompositionFrameMetadata metadata) {
@@ -295,5 +306,19 @@ public class CompositionPlayerParameterizedPlaybackTest {
       itemIndex++;
     }
     return sequence.editedMediaItems.get(itemIndex).mediaItem;
+  }
+
+  private static int getNumVideoSequences(Composition composition) {
+    int numVideoSequences = 0;
+    for (int i = 0; i < composition.sequences.size(); i++) {
+      if (composition.sequences.get(i).trackTypes.contains(TRACK_TYPE_VIDEO)) {
+        numVideoSequences++;
+      }
+    }
+    return numVideoSequences;
+  }
+
+  private static PlayerFence futureWhen(Player player) {
+    return PlayerFence.futureWhen(player).withTimeoutMs(TEST_TIMEOUT_MS);
   }
 }

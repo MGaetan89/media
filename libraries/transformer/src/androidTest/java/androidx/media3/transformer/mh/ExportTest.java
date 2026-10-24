@@ -19,7 +19,7 @@ import static android.media.MediaCodecInfo.CodecProfileLevel.AVCLevel41;
 import static android.media.MediaCodecInfo.CodecProfileLevel.AVCProfileHigh;
 import static android.os.Build.VERSION.SDK_INT;
 import static androidx.media3.common.util.MediaFormatUtil.createFormatFromMediaFormat;
-import static androidx.media3.test.utils.AssetInfo.MP4_ASSET;
+import static androidx.media3.test.utils.AssetInfo.MP4_ADVANCED_ASSET;
 import static androidx.media3.test.utils.AssetInfo.MP4_ASSET_4K60_PORTRAIT;
 import static androidx.media3.test.utils.AssetInfo.MP4_ASSET_8K24;
 import static androidx.media3.test.utils.AssetInfo.MP4_ASSET_BT2020_SDR;
@@ -193,6 +193,10 @@ public class ExportTest {
         Ascii.equalsIgnoreCase(Build.MODEL, "tb-q706")
             || Ascii.equalsIgnoreCase(Build.MODEL, "sm-f916u1")
             || Ascii.equalsIgnoreCase(Build.MODEL, "sm-g981u1")
+            || Ascii.equalsIgnoreCase(Build.MODEL, "sm-g781n")
+            || Ascii.equalsIgnoreCase(Build.MODEL, "sm-g781v")
+            || Ascii.equalsIgnoreCase(Build.MODEL, "sm-g986u1")
+            || Ascii.equalsIgnoreCase(Build.MODEL, "sm-n981u")
             || Ascii.equalsIgnoreCase(Build.MODEL, "le2121")
             || Ascii.equalsIgnoreCase(Build.MODEL, "seahawk")
             || Ascii.equalsIgnoreCase(Build.MODEL, "sm-t870"));
@@ -282,7 +286,7 @@ public class ExportTest {
             .setEncoderFactory(new ForceEncodeEncoderFactory(context))
             .build();
     EditedMediaItem editedMediaItem =
-        new EditedMediaItem.Builder(MediaItem.fromUri(Uri.parse(MP4_ASSET.uri)))
+        new EditedMediaItem.Builder(MediaItem.fromUri(Uri.parse(MP4_ADVANCED_ASSET.uri)))
             .setRemoveVideo(true)
             .build();
 
@@ -355,7 +359,7 @@ public class ExportTest {
   @Test
   public void exportTranscodeBt2020Sdr() throws Exception {
     // Reference: b/262732842#comment51
-    if (SDK_INT <= 27 && Build.MANUFACTURER.equals("samsung")) {
+    if (SDK_INT <= 30 && Build.MANUFACTURER.equals("samsung")) {
       String reason = "Some older Samsung encoders report a non-specified error code";
       recordTestSkipped(context, testId, reason);
       throw new AssumptionViolatedException(reason);

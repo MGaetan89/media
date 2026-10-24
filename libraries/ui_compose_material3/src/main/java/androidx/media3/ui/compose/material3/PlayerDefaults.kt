@@ -20,103 +20,255 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.material3.ButtonColors
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.IconButtonColors
-import androidx.compose.material3.IconButtonDefaults
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import androidx.media3.common.ErrorMessageProvider
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
-import androidx.media3.ui.compose.material3.buttons.MuteButton
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.compose.material3.buttons.NextButton
 import androidx.media3.ui.compose.material3.buttons.PlayPauseButton
-import androidx.media3.ui.compose.material3.buttons.PlaybackSpeedToggleButton
 import androidx.media3.ui.compose.material3.buttons.PreviousButton
-import androidx.media3.ui.compose.material3.buttons.RepeatButton
 import androidx.media3.ui.compose.material3.buttons.SeekBackButton
 import androidx.media3.ui.compose.material3.buttons.SeekForwardButton
-import androidx.media3.ui.compose.material3.buttons.ShuffleButton
-import androidx.media3.ui.compose.material3.indicator.PositionAndDurationText
+import androidx.media3.ui.compose.material3.indicator.DurationText
+import androidx.media3.ui.compose.material3.indicator.PositionText
 import androidx.media3.ui.compose.material3.indicator.ProgressSlider
+import androidx.media3.ui.compose.material3.text.ErrorText
+import androidx.media3.ui.compose.material3.text.rememberDefaultErrorMessageProvider
 
-internal object PlayerDefaults {
+/**
+ * Contains the default values used by [Player].
+ *
+ * This object provides the standard Material3 components that make up the default player interface,
+ * including structural layouts like [TopControls], [CenterControls], and [BottomControls].
+ *
+ * The components have opinionated styling properties to maintain a consistent aesthetic when
+ * building custom controls or overriding specific slots within the provided layouts.
+ */
+@UnstableApi
+object PlayerDefaults {
 
-  @get:Composable
-  val defaultIconButtonColors: IconButtonColors
-    get() = IconButtonDefaults.iconButtonColors(contentColor = MaterialTheme.colorScheme.primary)
+  internal val mediumButtonModifier: Modifier
+    @Composable
+    get() =
+      Modifier.size(PlayerTokens.MediumButtonSize)
+        .background(PlayerTokens.controlsBackgroundColor, ButtonDefaults.shape)
 
-  @get:Composable
-  val defaultTextButtonColors: ButtonColors
-    get() = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.primary)
+  internal val largeButtonModifier: Modifier
+    @Composable
+    get() =
+      Modifier.size(PlayerTokens.LargeButtonSize)
+        .background(PlayerTokens.controlsBackgroundColor, ButtonDefaults.shape)
 
-  @get:Composable
-  val defaultTextColor: Color
-    get() = MaterialTheme.colorScheme.primary
-
+  /**
+   * A Material3 horizontal layout with controls typically found at the top of the player interface.
+   *
+   * This component acts as a visibility wrapper and provides a flexible [Box]-based structure.
+   * Because it executes the content within a [BoxScope], you can easily align individual elements
+   * to specific corners (e.g., [Alignment.TopEnd] or [Alignment.TopStart]). By default, the
+   * [content] is empty.
+   *
+   * @param player The [Player] to control.
+   * @param visible Whether the controls should be visible.
+   * @param modifier The [Modifier] to be applied to the container.
+   * @param content The content of the top controls.
+   */
   @Composable
   fun TopControls(
     player: Player?,
     visible: Boolean,
     modifier: Modifier = Modifier,
-    innerModifier: Modifier = Modifier,
+    content: @Composable BoxScope.(Player?) -> Unit = {},
   ) {
     AnimatedVisibility(visible = visible, enter = fadeIn(), exit = fadeOut()) {
-      Row(modifier = modifier, horizontalArrangement = Arrangement.End) {
-        MuteButton(player, innerModifier, colors = defaultIconButtonColors)
-      }
+      Box(modifier) { content(player) }
     }
   }
 
+  /**
+   * A Material3 horizontal layout with controls that are typically found in the center of the
+   * player interface.
+   *
+   * This component provides a flexible slot-based structure for the center player controls. The
+   * layout is organized as a centered row of buttons:
+   * ```
+   * +---------------------------------------------------------------+
+   * |                                                               |
+   * | +-------------+--------+---------+---------+----------------+ |
+   * | |backSecondary|  back  | central | forward |forwardSecondary| |
+   * | +-------------+--------+---------+---------+----------------+ |
+   * |                                                               |
+   * +---------------------------------------------------------------+
+   * ```
+   *
+   * By default, it displays a [PreviousButton], [SeekBackButton], [PlayPauseButton],
+   * [SeekForwardButton], and [NextButton] in that order. The central play/pause button is slightly
+   * larger than the others.
+   *
+   * @param player The [Player] to control.
+   * @param visible Whether the layout should be visible. When `true`, a fade in-and-out animation
+   *   is used.
+   * @param modifier The [Modifier] to be applied to the container.
+   * @param horizontalArrangement The horizontal arrangement of the layout's children.
+   * @param verticalAlignment The vertical alignment of the layout's children.
+   * @param backSecondary Slot for the outermost left control. Defaults to [PreviousButton].
+   * @param back Slot for the inner left control. Defaults to [SeekBackButton].
+   * @param central Slot for the central control. Defaults to a large [PlayPauseButton].
+   * @param forward Slot for the inner right control. Defaults to [SeekForwardButton].
+   * @param forwardSecondary Slot for the outermost right control. Defaults to [NextButton].
+   */
   @Composable
   fun CenterControls(
     player: Player?,
-    showControls: Boolean,
+    visible: Boolean,
     modifier: Modifier = Modifier,
-    innerModifier: Modifier = Modifier,
+    horizontalArrangement: Arrangement.Horizontal =
+      Arrangement.spacedBy(PlayerTokens.CenterControlsSpacing, Alignment.CenterHorizontally),
+    verticalAlignment: Alignment.Vertical = Alignment.CenterVertically,
+    backSecondary: @Composable (Player?) -> Unit = {
+      PreviousButton(it, modifier = mediumButtonModifier)
+    },
+    back: @Composable (Player?) -> Unit = { SeekBackButton(it, modifier = mediumButtonModifier) },
+    central: @Composable (Player?) -> Unit = {
+      PlayPauseButton(it, modifier = largeButtonModifier, iconSize = PlayerTokens.LargeIconSize)
+    },
+    forward: @Composable (Player?) -> Unit = {
+      SeekForwardButton(it, modifier = mediumButtonModifier)
+    },
+    forwardSecondary: @Composable (Player?) -> Unit = {
+      NextButton(it, modifier = mediumButtonModifier)
+    },
   ) {
-    AnimatedVisibility(visible = showControls, enter = fadeIn(), exit = fadeOut()) {
+    AnimatedVisibility(visible = visible, enter = fadeIn(), exit = fadeOut()) {
       Row(
-        modifier,
-        horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
-        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier,
+        horizontalArrangement = horizontalArrangement,
+        verticalAlignment = verticalAlignment,
       ) {
-        PreviousButton(player, innerModifier, colors = defaultIconButtonColors)
-        SeekBackButton(player, innerModifier, colors = defaultIconButtonColors)
-        PlayPauseButton(player, innerModifier, colors = defaultIconButtonColors)
-        SeekForwardButton(player, innerModifier, colors = defaultIconButtonColors)
-        NextButton(player, innerModifier, colors = defaultIconButtonColors)
+        backSecondary(player)
+        back(player)
+        central(player)
+        forward(player)
+        forwardSecondary(player)
       }
     }
   }
 
+  /**
+   * A Material3 columnar layout that display controls that are typically positioned at the bottom
+   * of the player interface.
+   *
+   * This component provides a flexible slot-based structure for building player controls. The
+   * layout is organised as follows:
+   * ```
+   * +-------------------------------------------------+
+   * |                      above                      |
+   * +-------+---------------------------------+-------+
+   * | left  |         progressSlider          | right |
+   * +-------+---------------------------------+-------+
+   * |                      below                      |
+   * +-------------------------------------------------+
+   * ```
+   *
+   * By default, this layout provides a [ProgressSlider] in the center. To its left, it displays the
+   * current media position using [PositionText], and to its right, it displays the total media
+   * duration using [DurationText]. The [above] and [below] slots are empty by default.
+   *
+   * @param player The [Player] to control.
+   * @param visible Whether the layout should be visible. When `true`, a fade in-and-out animation
+   *   is used.
+   * @param modifier The [Modifier] to be applied to the column container.
+   * @param above Slot for content positioned above the slider.
+   * @param left Slot for content positioned to the left of the slider. Defaults to [PositionText]
+   *   with padding applied.
+   * @param progressSlider Slot for the main progress slider. It expands to fill available width and
+   *   defaults to [ProgressSlider].
+   * @param right Slot for content positioned to the right of the slider. Defaults to [DurationText]
+   *   with padding applied.
+   * @param below Slot for content positioned below the slider.
+   */
   @Composable
-  fun BottomControls(player: Player?, showControls: Boolean, modifier: Modifier = Modifier) {
-    AnimatedVisibility(visible = showControls, enter = fadeIn(), exit = fadeOut()) {
-      Column(modifier) {
-        ProgressSlider(player)
-        Row(
-          modifier = Modifier.fillMaxWidth(),
-          horizontalArrangement = Arrangement.Start,
-          verticalAlignment = Alignment.CenterVertically,
-        ) {
-          PositionAndDurationText(player, color = defaultTextColor)
-          Spacer(Modifier.weight(1f))
-          PlaybackSpeedToggleButton(player, colors = defaultTextButtonColors)
-          ShuffleButton(player, colors = defaultIconButtonColors)
-          RepeatButton(player, colors = defaultIconButtonColors)
+  fun BottomControls(
+    player: Player?,
+    visible: Boolean,
+    modifier: Modifier = Modifier,
+    above: @Composable ColumnScope.(Player?) -> Unit = {},
+    left: @Composable (Player?) -> Unit = {
+      PositionText(it, Modifier.padding(end = PlayerTokens.BottomControlsHorizontalPadding))
+    },
+    right: @Composable (Player?) -> Unit = {
+      DurationText(it, Modifier.padding(start = PlayerTokens.BottomControlsHorizontalPadding))
+    },
+    below: @Composable ColumnScope.(Player?) -> Unit = {},
+    progressSlider: @Composable (Player?) -> Unit = { ProgressSlider(it) },
+  ) {
+    AnimatedVisibility(
+      visible = visible,
+      modifier = Modifier.background(brush = PlayerTokens.bottomControlsGradient),
+      enter = fadeIn(),
+      exit = fadeOut(),
+    ) {
+      Column(modifier.padding(horizontal = PlayerTokens.ControlsHorizontalPadding)) {
+        above(player)
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+          left(player)
+          Box(modifier = Modifier.weight(1f)) { progressSlider(player) }
+          right(player)
         }
+        below(player)
       }
     }
   }
 
+  /**
+   * A Composable for displaying an error message overlay on top of the player.
+   *
+   * @param player The [Player] instance to observe for errors.
+   * @param modifier The [Modifier] to be applied to the layout.
+   * @param color The [Color] of the error text.
+   * @param customErrorMessage An optional custom message to display permanently.
+   * @param errorMessageProvider An optional [ErrorMessageProvider] used to format the
+   *   [PlaybackException].
+   */
   @Composable
-  fun Shutter(modifier: Modifier = Modifier) {
-    Box(modifier.fillMaxSize().background(MaterialTheme.colorScheme.background))
+  fun ErrorOverlay(
+    player: Player?,
+    modifier: Modifier = Modifier,
+    color: Color = Color.Unspecified,
+    customErrorMessage: CharSequence? = null,
+    errorMessageProvider: ErrorMessageProvider<PlaybackException>? =
+      rememberDefaultErrorMessageProvider(),
+  ) {
+    ErrorText(
+      player = player,
+      modifier =
+        modifier
+          .background(PlayerTokens.controlsBackgroundColor, RoundedCornerShape(4.dp))
+          .padding(8.dp),
+      color = color,
+      customErrorMessage = customErrorMessage,
+      errorMessageProvider = errorMessageProvider,
+    )
+  }
+
+  @Composable
+  internal fun Shutter(modifier: Modifier = Modifier) {
+    Box(modifier.fillMaxSize().background(PlayerTokens.shutterColor))
   }
 }

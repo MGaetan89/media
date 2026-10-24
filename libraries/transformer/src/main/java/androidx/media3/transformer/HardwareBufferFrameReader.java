@@ -21,11 +21,8 @@ import static com.google.common.base.Preconditions.checkState;
 
 import android.graphics.Bitmap;
 import android.hardware.HardwareBuffer;
-import android.media.Image;
-import android.media.ImageReader;
 import android.os.Handler;
 import android.os.Looper;
-import android.system.ErrnoException;
 import android.view.Surface;
 import androidx.annotation.GuardedBy;
 import androidx.annotation.Nullable;
@@ -35,12 +32,13 @@ import androidx.media3.common.Format;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.util.Consumer;
 import androidx.media3.common.util.HandlerWrapper;
-import androidx.media3.common.util.Log;
 import androidx.media3.common.util.TimestampIterator;
+import androidx.media3.common.video.SyncFenceWrapper;
 import androidx.media3.effect.HardwareBufferFrame;
-import androidx.media3.effect.SyncFenceCompat;
-import java.io.IOException;
+import androidx.media3.exoplayer.Renderer;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.Executor;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
@@ -55,6 +53,16 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
   public interface Listener {
     /** Reports an error. */
     void onError(Exception cause);
+  }
+
+  /** A listener for renderer wakeup events. */
+  public interface RendererWakeupListener {
+    /**
+     * Requests the {@link Renderer} to render some frames.
+     *
+     * @see Renderer.WakeupListener
+     */
+    void onWakeup();
   }
 
   /**
@@ -77,7 +85,7 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
   private final Composition composition;
   private final int sequenceIndex;
   private final Consumer<HardwareBufferFrame> frameConsumer;
-  private final ImageReader imageReader;
+  private final ImageReaderAdapter imageReader;
   private final Listener listener;
   private final HandlerWrapper listenerHandler;
   private final PlaybackExecutor playbackExecutor;
@@ -92,6 +100,8 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
    */
   @GuardedBy("this")
   private final Queue<FrameInfo> pendingFrameInfo;
+
+  private final List<RendererWakeupListener> rendererWakeupListenerList;
 
   private @MonotonicNonNull Surface imageReaderSurface;
 
@@ -112,15 +122,18 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
    * @param playbackLooper The looper associated with the playback thread.
    * @param defaultSurfacePixelFormat The default pixel format used by the {@linkplain #getSurface()
    *     surface}. Some producers override this format, but the behavior is device-specific.
+   * @param imageReaderAdapterFactory The {@link ImageReaderAdapter.Factory} used to create the
+   *     internal {@link ImageReaderAdapter}.
    * @param listener The listener.
    * @param listenerHandler A {@link HandlerWrapper} to dispatch {@link Listener} callbacks.
    */
-  HardwareBufferFrameReader(
+  /* package */ HardwareBufferFrameReader(
       Composition composition,
       int sequenceIndex,
       Consumer<HardwareBufferFrame> frameConsumer,
       Looper playbackLooper,
       int defaultSurfacePixelFormat,
+      ImageReaderAdapter.Factory imageReaderAdapterFactory,
       Listener listener,
       HandlerWrapper listenerHandler) {
     this.composition = composition;
@@ -128,28 +141,18 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
     this.frameConsumer = frameConsumer;
     this.listener = listener;
     this.listenerHandler = listenerHandler;
+    // The width and height are sensible defaults for tests and are typically ignored when writing
+    // from MediaCodec.
+    this.imageReader =
+        imageReaderAdapterFactory.create(
+            /* width= */ 640,
+            /* height= */ 360,
+            defaultSurfacePixelFormat,
+            /* maxImages= */ CAPACITY,
+            /* usage= */ SDK_INT >= 29 ? HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE : 0);
     Handler playbackHandler = new Handler(playbackLooper);
     playbackExecutor = new PlaybackExecutor(playbackHandler);
-    // The default width and height are ignored when writing from MediaCodec.
-    // Sensible values greater than 1 allow HardwareBufferFrameReaderTest to pass.
-    if (SDK_INT >= 29) {
-      imageReader =
-          ImageReader.newInstance(
-              /* width= */ 640,
-              /* height= */ 360,
-              defaultSurfacePixelFormat,
-              /* maxImages= */ CAPACITY,
-              // Setting the HardwareBuffer usage to GPU_SAMPLED_IMAGE allows the ImageReader to
-              // run on emulators.
-              /* usage= */ HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE);
-    } else {
-      imageReader =
-          ImageReader.newInstance(
-              /* width= */ 640,
-              /* height= */ 360,
-              defaultSurfacePixelFormat,
-              /* maxImages= */ CAPACITY);
-    }
+    rendererWakeupListenerList = new ArrayList<>();
     imageReader.setOnImageAvailableListener(playbackExecutor, playbackHandler);
     pendingFrameInfo = new ArrayDeque<>();
   }
@@ -186,15 +189,22 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
    * <p>This method must be called prior to {@linkplain android.media.MediaCodec#releaseOutputBuffer
    * releasing} the frame to the {@linkplain #getSurface() input surface}.
    *
-   * @param presentationTimeUs The presentation time of the frame, in microseconds.
+   * @param presentationTimeUs The presentation time of the frame relative to the start of the media
+   *     item it belongs to, in microseconds.
+   * @param sequenceOffsetUs The offset to add to {@code presentationTimeUs} to compute the
+   *     sequence-relative presentation time, in microseconds. This is typically the cumulative
+   *     duration of all preceding media items in the sequence.
    * @param indexOfItem The position of the edited media item in the sequence.
    * @param format The {@link Format} of the edited media item.
    */
-  void queueFrameViaSurface(long presentationTimeUs, int indexOfItem, Format format) {
+  void queueFrameViaSurface(
+      long presentationTimeUs, long sequenceOffsetUs, int indexOfItem, Format format) {
     synchronized (this) {
       pendingFrameInfo.add(
-          FrameInfo.createForSurface(presentationTimeUs, indexOfItem, getAdjustedFormat(format)));
+          FrameInfo.createForSurface(
+              presentationTimeUs, sequenceOffsetUs, indexOfItem, getAdjustedFormat(format)));
     }
+    imageReader.notifyFrameQueued(presentationTimeUs);
   }
 
   /**
@@ -204,11 +214,15 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
    * @param bitmap The {@link Bitmap} to be repeated.
    * @param timestampIterator The {@link TimestampIterator} that provides the presentation
    *     timestamps of the frames to output.
+   * @param sequenceOffsetUs The offset to add to the timestamps generated by the {@link
+   *     TimestampIterator} to compute the sequence-relative presentation time, in microseconds.
+   *     This is typically the cumulative duration of all preceding media items in the sequence.
    * @param indexOfItem The position of the edited media item in the sequence.
    */
   // TODO: b/319484746 - Move Bitmap repeating into the Renderer when ImageRenderer takes positionUs
   // into account.
-  void outputBitmap(Bitmap bitmap, TimestampIterator timestampIterator, int indexOfItem) {
+  void outputBitmap(
+      Bitmap bitmap, TimestampIterator timestampIterator, long sequenceOffsetUs, int indexOfItem) {
     Format format =
         new Format.Builder()
             .setSampleMimeType(MimeTypes.IMAGE_RAW)
@@ -219,9 +233,59 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
             .build();
     synchronized (this) {
       pendingFrameInfo.add(
-          FrameInfo.createForBitmap(bitmap, timestampIterator, indexOfItem, format));
+          FrameInfo.createForBitmap(
+              bitmap, timestampIterator, sequenceOffsetUs, indexOfItem, format));
     }
     maybeOutputPendingBitmaps();
+  }
+
+  /**
+   * Tries to read a frame from the {@linkplain #getSurface() input surface}. Forwards the frame
+   * downstream, if a new frame was available.
+   */
+  void pollImage() {
+    synchronized (this) {
+      if (framesInUse >= CAPACITY) {
+        return;
+      }
+      ImageAdapter image = imageReader.acquireNextImage();
+      if (image == null) {
+        return;
+      }
+      try {
+        // Increment the framesInUse count before dequeueing pendingFrameInfo, to ensure only up to
+        // CAPACITY images are queued.
+        framesInUse++;
+        @Nullable FrameInfo frameInfo = pendingFrameInfo.poll();
+        // If the HardwareBufferFrameReader is flushed after queueFrameViaSurface is called, but
+        // before onImageAvailable, then when onImageAvailable is called there will be no matching
+        // pendingFrameInfo. Ignore Images with no matching pendingFrameInfo to avoid crashing in
+        // this scenario.
+        if (frameInfo == null) {
+          image.close();
+          framesInUse--;
+          return;
+        }
+        long itemPresentationTimeUs = frameInfo.itemPresentationTimeUs;
+        long sequenceOffsetUs = frameInfo.sequenceOffsetUs;
+        int indexOfItem = frameInfo.itemIndex;
+        checkState(
+            image.getTimestampNs() == itemPresentationTimeUs * 1000,
+            "%s != %s",
+            image.getTimestampNs(),
+            itemPresentationTimeUs * 1000);
+
+        frameConsumer.accept(
+            createHardwareBufferFrameFromImage(
+                image, itemPresentationTimeUs, sequenceOffsetUs, indexOfItem, frameInfo.format));
+        maybeOutputPendingBitmaps();
+        maybeWakeupVideoRenderer();
+      } catch (RuntimeException e) {
+        image.close();
+        framesInUse--;
+        throw e;
+      }
+    }
   }
 
   /**
@@ -233,6 +297,26 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
       pendingFrameInfo.add(FrameInfo.END_OF_STREAM);
       maybeOutputPendingBitmaps();
     }
+  }
+
+  /**
+   * Registers a listener to receive wakeup events from the frame reader.
+   *
+   * @param rendererWakeupListener The listener to register.
+   */
+  void addRendererWakeupListener(RendererWakeupListener rendererWakeupListener) {
+    rendererWakeupListenerList.add(rendererWakeupListener);
+  }
+
+  /**
+   * Unregisters a listener registered through {@link
+   * #addRendererWakeupListener(RendererWakeupListener)}. The listener will no longer receive
+   * events.
+   *
+   * @param rendererWakeupListener The listener to unregister.
+   */
+  void removeRendererWakeupListener(RendererWakeupListener rendererWakeupListener) {
+    rendererWakeupListenerList.remove(rendererWakeupListener);
   }
 
   /** Clears all pending frames. */
@@ -267,46 +351,6 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
     return lastAdjustedFormat;
   }
 
-  private void onImageAvailable() {
-    Image image = null;
-    synchronized (this) {
-      try {
-        // Increment the framesInUse count before dequeueing pendingFrameInfo, to ensure only up to
-        // CAPACITY images are queued.
-        framesInUse++;
-        image = imageReader.acquireNextImage();
-        @Nullable FrameInfo frameInfo = pendingFrameInfo.poll();
-        // If the HardwareBufferFrameReader is flushed after queueFrameViaSurface is called, but
-        // before onImageAvailable, then when onImageAvailable is called there will be no matching
-        // pendingFrameInfo. Ignore Images with no matching pendingFrameInfo to avoid crashing in
-        // this scenario.
-        if (frameInfo == null) {
-          image.close();
-          framesInUse--;
-          return;
-        }
-        long presentationTimeUs = frameInfo.presentationTimeUs;
-        int indexOfItem = frameInfo.itemIndex;
-        checkState(
-            image.getTimestamp() == presentationTimeUs * 1000,
-            "%s != %s",
-            image.getTimestamp(),
-            presentationTimeUs * 1000);
-
-        frameConsumer.accept(
-            createHardwareBufferFrameFromImage(
-                image, presentationTimeUs, indexOfItem, frameInfo.format));
-        maybeOutputPendingBitmaps();
-      } catch (RuntimeException e) {
-        if (image != null) {
-          image.close();
-        }
-        framesInUse--;
-        throw e;
-      }
-    }
-  }
-
   private void maybeOutputPendingBitmaps() {
     synchronized (this) {
       @Nullable FrameInfo frameInfo = pendingFrameInfo.peek();
@@ -317,12 +361,14 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
           continue;
         }
 
-        long presentationTimeUs = frameInfo.timestampIterator.next();
+        long itemPresentationTimeUs = frameInfo.timestampIterator.next();
+        long sequenceOffsetUs = frameInfo.sequenceOffsetUs;
         framesInUse++;
         HardwareBufferFrame hardwareBufferFrame =
             createHardwareBufferFrameFromBitmap(
                 checkNotNull(frameInfo.bitmap),
-                presentationTimeUs,
+                itemPresentationTimeUs,
+                sequenceOffsetUs,
                 frameInfo.itemIndex,
                 frameInfo.format);
         frameConsumer.accept(hardwareBufferFrame);
@@ -343,7 +389,11 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
   }
 
   private HardwareBufferFrame createHardwareBufferFrameFromImage(
-      Image image, long presentationTimeUs, int indexOfItem, Format format) {
+      ImageAdapter image,
+      long presentationTimeUs,
+      long sequenceOffsetUs,
+      int indexOfItem,
+      Format format) {
     HardwareBufferFrame.Builder frameBuilder;
     // TODO: b/449956936 - Add support for HardwareBuffer on API 26 using Media NDK methods such as
     // AImage_getHardwareBuffer.
@@ -370,12 +420,13 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
               });
     }
     // TODO: b/449956936 - Set the acquire fence from image on the frameBuilder.
-    frameBuilder.setInternalFrame(image);
-    return createHardwareBufferFrame(frameBuilder, presentationTimeUs, indexOfItem, format);
+    frameBuilder.setInternalFrame(image.getInternalImage());
+    return createHardwareBufferFrame(
+        frameBuilder, presentationTimeUs, sequenceOffsetUs, indexOfItem, format);
   }
 
   private HardwareBufferFrame createHardwareBufferFrameFromBitmap(
-      Bitmap bitmap, long presentationTimeUs, int itemIndex, Format format) {
+      Bitmap bitmap, long presentationTimeUs, long sequenceOffsetUs, int itemIndex, Format format) {
     HardwareBufferFrame.Builder frameBuilder;
     // TODO: b/449956936 - Copy the Bitmap into a HardwareBuffer using NDK on earlier API levels.
     if (SDK_INT >= 31 && checkNotNull(bitmap).getConfig() == Bitmap.Config.HARDWARE) {
@@ -400,12 +451,14 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
               });
     }
     frameBuilder.setInternalFrame(bitmap);
-    return createHardwareBufferFrame(frameBuilder, presentationTimeUs, itemIndex, format);
+    return createHardwareBufferFrame(
+        frameBuilder, presentationTimeUs, sequenceOffsetUs, itemIndex, format);
   }
 
   private HardwareBufferFrame createHardwareBufferFrame(
       HardwareBufferFrame.Builder frameBuilder,
       long presentationTimeUs,
+      long sequenceOffsetUs,
       int itemIndex,
       Format format) {
     // COLOR_TRANSFER_SRGB may not be supported by the encoder or display, but is equivalent to
@@ -415,30 +468,25 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
           format.colorInfo.buildUpon().setColorTransfer(C.COLOR_TRANSFER_SDR).build();
       format = format.buildUpon().setColorInfo(adjustedColorInfo).build();
     }
+    long sequencePresentationTimeUs = presentationTimeUs + sequenceOffsetUs;
     return frameBuilder
         .setPresentationTimeUs(presentationTimeUs)
+        .setSequencePresentationTimeUs(sequencePresentationTimeUs)
         .setMetadata(new CompositionFrameMetadata(composition, sequenceIndex, itemIndex))
         .setFormat(format)
         .build();
   }
 
   private void releaseFrame(
-      @Nullable Image image,
+      @Nullable ImageAdapter image,
       @Nullable HardwareBuffer hardwareBuffer,
-      @Nullable SyncFenceCompat releaseFence) {
+      @Nullable SyncFenceWrapper releaseFence) {
     synchronized (this) {
       framesInUse--;
       if (releaseFence != null) {
-        try {
-          // TODO: b/475744934 - Use the NDK to set the fence on the Image.
-          boolean signaled = releaseFence.await(/* timeoutMs= */ 500);
-          if (!signaled) {
-            Log.w(TAG, "releaseFence timed out.");
-          }
-          releaseFence.close();
-        } catch (ErrnoException | IOException e) {
-          listener.onError(e);
-        }
+        // TODO: b/475744934 - Use the NDK to set the fence on the Image.
+        checkState(releaseFence.awaitMs(500));
+        releaseFence.close();
       }
       if (SDK_INT >= 26 && hardwareBuffer != null) {
         hardwareBuffer.close();
@@ -448,13 +496,20 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
       }
     }
     maybeOutputPendingBitmaps();
+    maybeWakeupVideoRenderer();
+  }
+
+  private void maybeWakeupVideoRenderer() {
+    for (int i = 0; i < rendererWakeupListenerList.size(); i++) {
+      rendererWakeupListenerList.get(i).onWakeup();
+    }
   }
 
   /**
    * A {@link Executor} which executes commands on a {@link Handler} and propagates {@linkplain
    * RuntimeException errors} to the {@link Listener}.
    */
-  private class PlaybackExecutor implements ImageReader.OnImageAvailableListener, Executor {
+  private class PlaybackExecutor implements Consumer<ImageReaderAdapter>, Executor {
 
     final Handler playbackHandler;
 
@@ -475,9 +530,9 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
     }
 
     @Override
-    public void onImageAvailable(ImageReader reader) {
+    public void accept(ImageReaderAdapter reader) {
       try {
-        HardwareBufferFrameReader.this.onImageAvailable();
+        pollImage();
       } catch (RuntimeException e) {
         listenerHandler.post(() -> listener.onError(e));
       }
@@ -491,7 +546,8 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
         new FrameInfo(
             null,
             null,
-            /* presentationTimeUs= */ C.TIME_END_OF_SOURCE,
+            /* itemPresentationTimeUs= */ C.TIME_END_OF_SOURCE,
+            /* sequenceOffsetUs= */ 0,
             /* itemIndex= */ C.INDEX_UNSET,
             /* format= */ new Format.Builder().build());
 
@@ -508,29 +564,36 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
     @Nullable final TimestampIterator timestampIterator;
 
     final Format format;
-    final long presentationTimeUs;
+    final long itemPresentationTimeUs;
+    final long sequenceOffsetUs;
     final int itemIndex;
 
     static FrameInfo createForBitmap(
-        Bitmap bitmap, TimestampIterator timestampIterator, int itemIndex, Format format) {
+        Bitmap bitmap,
+        TimestampIterator timestampIterator,
+        long sequenceOffsetUs,
+        int itemIndex,
+        Format format) {
       return new FrameInfo(
-          bitmap, timestampIterator, /* presentationTimeUs= */ C.TIME_UNSET, itemIndex, format);
+          bitmap, timestampIterator, C.TIME_UNSET, sequenceOffsetUs, itemIndex, format);
     }
 
-    static FrameInfo createForSurface(long presentationTimeUs, int itemIndex, Format format) {
-      return new FrameInfo(
-          /* bitmap= */ null, /* timestampIterator= */ null, presentationTimeUs, itemIndex, format);
+    static FrameInfo createForSurface(
+        long itemPresentationTimeUs, long sequenceOffsetUs, int itemIndex, Format format) {
+      return new FrameInfo(null, null, itemPresentationTimeUs, sequenceOffsetUs, itemIndex, format);
     }
 
     private FrameInfo(
         @Nullable Bitmap bitmap,
         @Nullable TimestampIterator timestampIterator,
-        long presentationTimeUs,
+        long itemPresentationTimeUs,
+        long sequenceOffsetUs,
         int itemIndex,
         Format format) {
       this.bitmap = bitmap;
       this.timestampIterator = timestampIterator;
-      this.presentationTimeUs = presentationTimeUs;
+      this.itemPresentationTimeUs = itemPresentationTimeUs;
+      this.sequenceOffsetUs = sequenceOffsetUs;
       this.itemIndex = itemIndex;
       this.format = format;
     }

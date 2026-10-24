@@ -119,14 +119,17 @@ public final class ShadowMediaCodecConfig extends ExternalResource {
       new CodecInfo(
           /* codecName= */ "media3.video.vp9",
           MimeTypes.VIDEO_VP9,
-          /* profileLevels= */ ImmutableList.of(),
+          /* profileLevels= */ ImmutableList.of(
+              createCodecProfileLevel(CodecProfileLevel.VP9Profile0, CodecProfileLevel.VP9Level51)),
           /* colorFormats= */ ImmutableList.of(
               MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible));
   public static final CodecInfo CODEC_INFO_AV1 =
       new CodecInfo(
           /* codecName= */ "media3.video.av1",
           MimeTypes.VIDEO_AV1,
-          /* profileLevels= */ ImmutableList.of(),
+          /* profileLevels= */ ImmutableList.of(
+              createCodecProfileLevel(
+                  CodecProfileLevel.AV1ProfileMain8, CodecProfileLevel.AV1Level51)),
           /* colorFormats= */ ImmutableList.of(
               MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible));
   public static final CodecInfo CODEC_INFO_AAC =
@@ -385,7 +388,7 @@ public final class ShadowMediaCodecConfig extends ExternalResource {
     public void configure() {
       // TODO: Update ShadowMediaCodec to consider the MediaFormat.KEY_MAX_INPUT_SIZE value passed
       // to configure() so we don't have to specify large buffers here.
-      int bufferSize = MimeTypes.isVideo(codecInfo.mimeType) ? 250_000 : 20_000;
+      int bufferSize = MimeTypes.isVideo(codecInfo.mimeType) ? 1_000_000 : 20_000;
       configureShadowMediaCodec(
           codecInfo.codecName,
           codecInfo.mimeType,

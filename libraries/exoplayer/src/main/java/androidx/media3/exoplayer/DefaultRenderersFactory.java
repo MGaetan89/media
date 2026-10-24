@@ -16,6 +16,7 @@
 package androidx.media3.exoplayer;
 
 import static android.os.Build.VERSION.SDK_INT;
+import static androidx.media3.exoplayer.video.MediaCodecVideoRenderer.DEFAULT_EARLY_SCHEDULING_THRESHOLD_US;
 import static androidx.media3.exoplayer.video.MediaCodecVideoRenderer.DEFAULT_LATE_THRESHOLD_TO_DROP_DECODER_INPUT_US;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static java.lang.annotation.ElementType.TYPE_USE;
@@ -125,6 +126,7 @@ public class DefaultRenderersFactory implements RenderersFactory {
   private boolean enableMediaCodecVideoRendererPrewarming;
   private boolean parseAv1SampleDependencies;
   private long lateThresholdToDropDecoderInputUs;
+  private long videoRendererEarlySchedulingThresholdUs;
   private boolean enableMediaCodecBufferDecodeOnlyFlag;
   private boolean enableMediaCodecVideoRendererDurationToProgressUs;
 
@@ -139,6 +141,7 @@ public class DefaultRenderersFactory implements RenderersFactory {
     mediaCodecSelector = MediaCodecSelector.DEFAULT;
     parseAv1SampleDependencies = true;
     lateThresholdToDropDecoderInputUs = DEFAULT_LATE_THRESHOLD_TO_DROP_DECODER_INPUT_US;
+    videoRendererEarlySchedulingThresholdUs = DEFAULT_EARLY_SCHEDULING_THRESHOLD_US;
   }
 
   /**
@@ -187,7 +190,7 @@ public class DefaultRenderersFactory implements RenderersFactory {
   }
 
   /**
-   * Sets whether to enable {@link MediaCodec#CONFIGURE_FLAG_USE_CRYPTO_ASYNC} on API 34 and above
+   * Sets whether to enable {@link MediaCodec#CONFIGURE_FLAG_USE_CRYPTO_ASYNC} on API 36 and above
    * when operating the codec in asynchronous mode.
    *
    * <p>This method is experimental. Its default value may change, or it may be renamed or removed
@@ -197,7 +200,7 @@ public class DefaultRenderersFactory implements RenderersFactory {
   @ExperimentalApi // TODO: b/470368123 - Remove method once flag usage once safe.
   public final DefaultRenderersFactory experimentalSetMediaCodecAsyncCryptoFlagEnabled(
       boolean enableAsyncCryptoFlag) {
-    codecAdapterFactory.experimentalSetAsyncCryptoFlagEnabled(enableAsyncCryptoFlag);
+    codecAdapterFactory.setAsyncCryptoFlagEnabled(enableAsyncCryptoFlag);
     return this;
   }
 
@@ -417,6 +420,26 @@ public class DefaultRenderersFactory implements RenderersFactory {
     return this;
   }
 
+  /**
+   * Sets the threshold for how early {@link MediaCodecVideoRenderer} will schedule a frame for
+   * release on the surface.
+   *
+   * <p>This value is in microseconds. The default value is {@link
+   * MediaCodecVideoRenderer#DEFAULT_EARLY_SCHEDULING_THRESHOLD_US}.
+   *
+   * <p>This method is experimental and will be renamed or removed in a future release.
+   *
+   * @param videoRendererEarlySchedulingThresholdUs The maximum early time threshold in
+   *     microseconds.
+   */
+  @CanIgnoreReturnValue
+  @ExperimentalApi // TODO: b/505688667 - Remove or make non-experimental.
+  public final DefaultRenderersFactory setVideoRendererEarlySchedulingThresholdUs(
+      long videoRendererEarlySchedulingThresholdUs) {
+    this.videoRendererEarlySchedulingThresholdUs = videoRendererEarlySchedulingThresholdUs;
+    return this;
+  }
+
   @Override
   public Renderer[] createRenderers(
       Handler eventHandler,
@@ -466,6 +489,34 @@ public class DefaultRenderersFactory implements RenderersFactory {
     return renderersList.toArray(new Renderer[0]);
   }
 
+  private MediaCodecVideoRenderer createMediaCodecVideoRenderer(
+      Context context,
+      MediaCodecSelector mediaCodecSelector,
+      boolean enableDecoderFallback,
+      Handler eventHandler,
+      VideoRendererEventListener eventListener,
+      long allowedVideoJoiningTimeMs) {
+    MediaCodecVideoRenderer.Builder builder =
+        new MediaCodecVideoRenderer.Builder(context)
+            .setCodecAdapterFactory(getCodecAdapterFactory())
+            .setMediaCodecSelector(mediaCodecSelector)
+            .setAllowedJoiningTimeMs(allowedVideoJoiningTimeMs)
+            .setEnableDecoderFallback(enableDecoderFallback)
+            .setEventHandler(eventHandler)
+            .setEventListener(eventListener)
+            .setMaxDroppedFramesToNotify(MAX_DROPPED_VIDEO_FRAME_COUNT_TO_NOTIFY)
+            .experimentalSetParseAv1SampleDependencies(parseAv1SampleDependencies)
+            .experimentalSetLateThresholdToDropDecoderInputUs(lateThresholdToDropDecoderInputUs)
+            .setEnableDurationToProgressUs(enableMediaCodecVideoRendererDurationToProgressUs)
+            .setEarlySchedulingThresholdUs(videoRendererEarlySchedulingThresholdUs);
+    if (SDK_INT >= 34) {
+      builder =
+          builder.experimentalSetEnableMediaCodecBufferDecodeOnlyFlag(
+              enableMediaCodecBufferDecodeOnlyFlag);
+    }
+    return builder.build();
+  }
+
   /**
    * Builds video renderers for use by the player.
    *
@@ -490,24 +541,14 @@ public class DefaultRenderersFactory implements RenderersFactory {
       VideoRendererEventListener eventListener,
       long allowedVideoJoiningTimeMs,
       ArrayList<Renderer> out) {
-    MediaCodecVideoRenderer.Builder videoRendererBuilder =
-        new MediaCodecVideoRenderer.Builder(context)
-            .setCodecAdapterFactory(getCodecAdapterFactory())
-            .setMediaCodecSelector(mediaCodecSelector)
-            .setAllowedJoiningTimeMs(allowedVideoJoiningTimeMs)
-            .setEnableDecoderFallback(enableDecoderFallback)
-            .setEventHandler(eventHandler)
-            .setEventListener(eventListener)
-            .setMaxDroppedFramesToNotify(MAX_DROPPED_VIDEO_FRAME_COUNT_TO_NOTIFY)
-            .experimentalSetParseAv1SampleDependencies(parseAv1SampleDependencies)
-            .experimentalSetLateThresholdToDropDecoderInputUs(lateThresholdToDropDecoderInputUs)
-            .setEnableDurationToProgressUs(enableMediaCodecVideoRendererDurationToProgressUs);
-    if (SDK_INT >= 34) {
-      videoRendererBuilder =
-          videoRendererBuilder.experimentalSetEnableMediaCodecBufferDecodeOnlyFlag(
-              enableMediaCodecBufferDecodeOnlyFlag);
-    }
-    out.add(videoRendererBuilder.build());
+    out.add(
+        createMediaCodecVideoRenderer(
+            context,
+            mediaCodecSelector,
+            enableDecoderFallback,
+            eventHandler,
+            eventListener,
+            allowedVideoJoiningTimeMs));
 
     if (extensionRendererMode == EXTENSION_RENDERER_MODE_OFF) {
       return;
@@ -959,23 +1000,13 @@ public class DefaultRenderersFactory implements RenderersFactory {
       long allowedVideoJoiningTimeMs) {
     if (enableMediaCodecVideoRendererPrewarming
         && renderer.getClass() == MediaCodecVideoRenderer.class) {
-      MediaCodecVideoRenderer.Builder builder =
-          new MediaCodecVideoRenderer.Builder(context)
-              .setCodecAdapterFactory(getCodecAdapterFactory())
-              .setMediaCodecSelector(mediaCodecSelector)
-              .setAllowedJoiningTimeMs(allowedVideoJoiningTimeMs)
-              .setEnableDecoderFallback(enableDecoderFallback)
-              .setEventHandler(eventHandler)
-              .setEventListener(eventListener)
-              .setMaxDroppedFramesToNotify(MAX_DROPPED_VIDEO_FRAME_COUNT_TO_NOTIFY)
-              .experimentalSetParseAv1SampleDependencies(parseAv1SampleDependencies)
-              .experimentalSetLateThresholdToDropDecoderInputUs(lateThresholdToDropDecoderInputUs);
-      if (SDK_INT >= 34) {
-        builder =
-            builder.experimentalSetEnableMediaCodecBufferDecodeOnlyFlag(
-                enableMediaCodecBufferDecodeOnlyFlag);
-      }
-      return builder.build();
+      return createMediaCodecVideoRenderer(
+          context,
+          mediaCodecSelector,
+          enableDecoderFallback,
+          eventHandler,
+          eventListener,
+          allowedVideoJoiningTimeMs);
     }
     return null;
   }

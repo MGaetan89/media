@@ -21,6 +21,7 @@ import static java.lang.Math.max;
 import static java.lang.Math.min;
 
 import android.net.Uri;
+import android.os.Build;
 import android.os.Handler;
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
@@ -31,6 +32,7 @@ import androidx.media3.common.Metadata;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.ParserException;
 import androidx.media3.common.TrackGroup;
+import androidx.media3.common.util.CodecSpecificDataUtil;
 import androidx.media3.common.util.ConditionVariable;
 import androidx.media3.common.util.Log;
 import androidx.media3.common.util.NullableType;
@@ -72,12 +74,14 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.net.HttpHeaders;
 import java.io.IOException;
 import java.io.InterruptedIOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.checkerframework.checker.nullness.qual.EnsuresNonNull;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 
@@ -159,7 +163,9 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
   private boolean seenFirstTrackSelection;
   private boolean notifyDiscontinuity;
   private boolean pendingInitialDiscontinuity;
+  private boolean usesStreamPrerollFlags;
   private int enabledTrackCount;
+  private final List<MergingMetadataSampleStream> mergingSampleStreams;
   private boolean isLengthKnown;
 
   private long lastSeekPositionUs;
@@ -247,6 +253,7 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
     sampleQueueTrackIds = new TrackId[0];
     sampleQueues = new SampleQueue[0];
     controlledTrackOutputs = new ControlledTrackOutput[0];
+    mergingSampleStreams = new ArrayList<>();
     pendingResetPositionUs = C.TIME_UNSET;
     dataType = C.DATA_TYPE_MEDIA;
   }
@@ -321,14 +328,48 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
     TrackGroupArray tracks = trackState.tracks;
     boolean[] trackEnabledStates = trackState.trackEnabledStates;
     int oldEnabledTrackCount = enabledTrackCount;
+
+    boolean isT35TrackExplicitlySelected = false;
+    for (int i = 0; i < selections.length; i++) {
+      if (selections[i] != null) {
+        int track = tracks.indexOf(selections[i].getTrackGroup());
+        if (Objects.equals(
+            tracks.get(track).getFormat(0).sampleMimeType, MimeTypes.APPLICATION_ITUT_T35)) {
+          isT35TrackExplicitlySelected = true;
+          break;
+        }
+      }
+    }
+
     // Deselect old tracks.
     for (int i = 0; i < selections.length; i++) {
-      if (streams[i] != null && (selections[i] == null || !mayRetainStreamFlags[i])) {
-        int track = ((SampleStreamImpl) streams[i]).track;
-        checkState(trackEnabledStates[track]);
-        enabledTrackCount--;
-        trackEnabledStates[track] = false;
-        streams[i] = null;
+      if (streams[i] != null) {
+        boolean shouldDeselect =
+            selections[i] == null
+                || !mayRetainStreamFlags[i]
+                || (isT35TrackExplicitlySelected
+                    && streams[i] instanceof MergingMetadataSampleStream);
+        if (shouldDeselect) {
+          if (streams[i] instanceof MergingMetadataSampleStream) {
+            MergingMetadataSampleStream mergingStream = (MergingMetadataSampleStream) streams[i];
+            mergingSampleStreams.remove(mergingStream);
+            int primaryTrack = ((SampleStreamImpl) mergingStream.getPrimaryStream()).track;
+            checkState(trackEnabledStates[primaryTrack]);
+            enabledTrackCount--;
+            trackEnabledStates[primaryTrack] = false;
+
+            int metadataTrack = ((SampleStreamImpl) mergingStream.getMetadataStream()).track;
+            checkState(trackEnabledStates[metadataTrack]);
+            enabledTrackCount--;
+            trackEnabledStates[metadataTrack] = false;
+          } else {
+            int track = ((SampleStreamImpl) streams[i]).track;
+            checkState(trackEnabledStates[track]);
+            enabledTrackCount--;
+            trackEnabledStates[track] = false;
+          }
+          streams[i] = null;
+        }
       }
     }
     // We'll always need to seek if this is a first selection to a non-zero position (except for
@@ -336,6 +377,7 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
     // disabled all tracks.
     boolean seekRequired =
         seenFirstTrackSelection ? oldEnabledTrackCount == 0 : positionUs != 0 && !isSingleSample;
+    boolean hasPreroll = false;
     // Select new tracks.
     for (int i = 0; i < selections.length; i++) {
       if (streams[i] == null && selections[i] != null) {
@@ -346,8 +388,34 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
         checkState(!trackEnabledStates[track]);
         enabledTrackCount++;
         trackEnabledStates[track] = true;
-        pendingInitialDiscontinuity |= selection.getSelectedFormat().hasPrerollSamples;
-        streams[i] = new SampleStreamImpl(track);
+        hasPreroll |= selection.getSelectedFormat().hasPrerollSamples;
+        SampleStream stream =
+            new SampleStreamImpl(track, selection.getSelectedFormat().hasPrerollSamples);
+        if (Build.VERSION.SDK_INT >= 37
+            && !isT35TrackExplicitlySelected
+            && MimeTypes.isVideo(selection.getSelectedFormat().sampleMimeType)) {
+          // TODO: b/388762778 - The MP4 container has extra information (e.g. cdsc box) specifying
+          // which HAGC track describes which video track. We should use this information to create
+          // the correct mergingSampleStreams when multiple video/HAGC tracks exist.
+          for (int j = 0; j < tracks.length; j++) {
+            Format format = tracks.get(j).getFormat(0);
+            if (CodecSpecificDataUtil.isHagcTrack(format)) {
+              checkState(!trackEnabledStates[j]);
+              enabledTrackCount++;
+              trackEnabledStates[j] = true;
+              // HAGC it35 metadata samples are standalone and do not depend on
+              // previous samples, hence hasPreroll is not relevant and always false.
+              stream =
+                  new MergingMetadataSampleStream(
+                      stream,
+                      new SampleStreamImpl(j, /* hasPreroll= */ false),
+                      selection.getSelectedFormat());
+              mergingSampleStreams.add((MergingMetadataSampleStream) stream);
+              break;
+            }
+          }
+        }
+        streams[i] = stream;
         streamResetFlags[i] = true;
 
         if (loadOnlySelectedTracks) {
@@ -367,6 +435,10 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
                   && !sampleQueue.seekTo(positionUs, /* allowTimeBeyondBuffer= */ true);
         }
       }
+    }
+
+    if (pendingInitialDiscontinuity || !seenFirstTrackSelection) {
+      pendingInitialDiscontinuity = hasPreroll;
     }
 
     if (loadOnlySelectedTracks) {
@@ -397,6 +469,9 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
       for (int i = 0; i < streams.length; i++) {
         if (streams[i] != null) {
           streamResetFlags[i] = true;
+          if (streams[i] instanceof MergingMetadataSampleStream) {
+            ((MergingMetadataSampleStream) streams[i]).reset();
+          }
         }
       }
     }
@@ -456,8 +531,13 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
   }
 
   @Override
+  public void setUsesStreamPrerollFlags() {
+    this.usesStreamPrerollFlags = true;
+  }
+
+  @Override
   public long readDiscontinuity() {
-    if (pendingInitialDiscontinuity) {
+    if (!usesStreamPrerollFlags && pendingInitialDiscontinuity) {
       pendingInitialDiscontinuity = false;
       return lastSeekPositionUs;
     }
@@ -501,6 +581,9 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 
   @Override
   public long seekToUs(long positionUs) {
+    for (MergingMetadataSampleStream stream : mergingSampleStreams) {
+      stream.reset();
+    }
     assertPrepared();
     boolean[] trackIsAudioVideoFlags = trackState.trackIsAudioVideoFlags;
     // Treat all seeks into non-seekable media as being to t=0.
@@ -669,19 +752,17 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
   public void onLoadStarted(
       ExtractingLoadable loadable, long elapsedRealtimeMs, long loadDurationMs, int retryCount) {
     StatsDataSource dataSource = loadable.dataSource;
-    LoadEventInfo loadEventInfo =
-        retryCount == 0
-            ? new LoadEventInfo(loadable.loadTaskId, loadable.dataSpec, elapsedRealtimeMs)
-            : new LoadEventInfo(
-                loadable.loadTaskId,
-                loadable.dataSpec,
-                dataSource.getLastOpenedUri(),
-                dataSource.getLastResponseHeaders(),
-                elapsedRealtimeMs,
-                loadDurationMs,
-                dataSource.getBytesRead());
+    LoadEventInfo.Builder loadEventInfo =
+        new LoadEventInfo.Builder(loadable.loadTaskId, loadable.dataSpec, elapsedRealtimeMs);
+    if (retryCount != 0) {
+      loadEventInfo
+          .setUri(dataSource.getLastOpenedUri())
+          .setResponseHeaders(dataSource.getLastResponseHeaders())
+          .setLoadDurationMs(loadDurationMs)
+          .setBytesLoaded(dataSource.getBytesRead());
+    }
     mediaSourceEventDispatcher.loadStarted(
-        loadEventInfo,
+        loadEventInfo.build(),
         C.DATA_TYPE_MEDIA,
         C.TRACK_TYPE_UNKNOWN,
         /* trackFormat= */ null,
@@ -706,14 +787,12 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
     }
     StatsDataSource dataSource = loadable.dataSource;
     LoadEventInfo loadEventInfo =
-        new LoadEventInfo(
-            loadable.loadTaskId,
-            loadable.dataSpec,
-            dataSource.getLastOpenedUri(),
-            dataSource.getLastResponseHeaders(),
-            elapsedRealtimeMs,
-            loadDurationMs,
-            dataSource.getBytesRead());
+        new LoadEventInfo.Builder(loadable.loadTaskId, loadable.dataSpec, elapsedRealtimeMs)
+            .setUri(dataSource.getLastOpenedUri())
+            .setResponseHeaders(dataSource.getLastResponseHeaders())
+            .setLoadDurationMs(loadDurationMs)
+            .setBytesLoaded(dataSource.getBytesRead())
+            .build();
     loadErrorHandlingPolicy.onLoadTaskConcluded(loadable.loadTaskId);
     mediaSourceEventDispatcher.loadCompleted(
         loadEventInfo,
@@ -733,14 +812,12 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
       ExtractingLoadable loadable, long elapsedRealtimeMs, long loadDurationMs, boolean released) {
     StatsDataSource dataSource = loadable.dataSource;
     LoadEventInfo loadEventInfo =
-        new LoadEventInfo(
-            loadable.loadTaskId,
-            loadable.dataSpec,
-            dataSource.getLastOpenedUri(),
-            dataSource.getLastResponseHeaders(),
-            elapsedRealtimeMs,
-            loadDurationMs,
-            dataSource.getBytesRead());
+        new LoadEventInfo.Builder(loadable.loadTaskId, loadable.dataSpec, elapsedRealtimeMs)
+            .setUri(dataSource.getLastOpenedUri())
+            .setResponseHeaders(dataSource.getLastResponseHeaders())
+            .setLoadDurationMs(loadDurationMs)
+            .setBytesLoaded(dataSource.getBytesRead())
+            .build();
     loadErrorHandlingPolicy.onLoadTaskConcluded(loadable.loadTaskId);
     mediaSourceEventDispatcher.loadCanceled(
         loadEventInfo,
@@ -770,14 +847,12 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
       int errorCount) {
     StatsDataSource dataSource = loadable.dataSource;
     LoadEventInfo loadEventInfo =
-        new LoadEventInfo(
-            loadable.loadTaskId,
-            loadable.dataSpec,
-            dataSource.getLastOpenedUri(),
-            dataSource.getLastResponseHeaders(),
-            elapsedRealtimeMs,
-            loadDurationMs,
-            dataSource.getBytesRead());
+        new LoadEventInfo.Builder(loadable.loadTaskId, loadable.dataSpec, elapsedRealtimeMs)
+            .setUri(dataSource.getLastOpenedUri())
+            .setResponseHeaders(dataSource.getLastResponseHeaders())
+            .setLoadDurationMs(loadDurationMs)
+            .setBytesLoaded(dataSource.getBytesRead())
+            .build();
     MediaLoadData mediaLoadData =
         new MediaLoadData(
             C.DATA_TYPE_MEDIA,
@@ -963,7 +1038,6 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
                 .build();
       }
       trackArray[i] = new TrackGroup(/* id= */ Integer.toString(i), trackFormat);
-      pendingInitialDiscontinuity |= trackFormat.hasPrerollSamples;
       sampleQueues[i].setReadEndTimeUs(endPositionUs);
     }
     trackState = new TrackState(new TrackGroupArray(trackArray), trackIsAudioVideoFlags);
@@ -1069,13 +1143,28 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
         continue;
       }
 
-      if (sampleQueue.getReadIndex() == 0 && isSameAsLastSeekPosition) {
+      if (isSingleSample) {
+        // Single sample media (like images) only have one sample, so seeking always succeeds
+        // by resetting to the first sample.
+        sampleQueue.seekTo(sampleQueue.getFirstIndex());
+        continue;
+      }
+      long firstTimestampUs = sampleQueue.getFirstTimestampUs();
+      if (firstTimestampUs != Long.MIN_VALUE
+          && positionUs <= firstTimestampUs
+          && sampleQueue.getFirstIndex() == 0
+          && isSameAsLastSeekPosition) {
+        // If the seek target position is at or before the timestamp of the very first queued
+        // sample,
+        // and all samples loaded from the beginning of the stream are still present, reset to the
+        // first sample by index. This avoids falling through to a timestamp-based seek, which would
+        // reject the seek if the target position is strictly smaller than the first sample's
+        // timestamp (e.g., when seeking to time 0 on an audio track with encoder delay).
+        sampleQueue.seekTo(sampleQueue.getFirstIndex());
         continue;
       }
       boolean seekInsideQueue =
-          isSingleSample
-              ? sampleQueue.seekTo(sampleQueue.getFirstIndex())
-              : sampleQueue.seekTo(positionUs, /* allowTimeBeyondBuffer= */ loadingFinished);
+          sampleQueue.seekTo(positionUs, /* allowTimeBeyondBuffer= */ loadingFinished);
       // If we have AV tracks then an in-buffer seek is successful if the seek into every AV queue
       // is successful. We ignore whether seeks within non-AV queues are successful in this case, as
       // they may be sparse or poorly interleaved. If we only have non-AV tracks then a seek is
@@ -1120,9 +1209,11 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
   private final class SampleStreamImpl implements SampleStream {
 
     private final int track;
+    private final boolean hasPreroll;
 
-    public SampleStreamImpl(int track) {
+    private SampleStreamImpl(int track, boolean hasPreroll) {
       this.track = track;
+      this.hasPreroll = hasPreroll;
     }
 
     @Override
@@ -1144,6 +1235,11 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
     @Override
     public int skipData(long positionUs) {
       return ProgressiveMediaPeriod.this.skipData(track, positionUs);
+    }
+
+    @Override
+    public @Flags int getFlags() {
+      return hasPreroll ? FLAG_HAS_PREROLL : 0;
     }
   }
 
@@ -1378,26 +1474,13 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
   private static class ControlledTrackOutput extends ForwardingTrackOutput {
     private final SampleQueue sampleQueue;
     private final DiscardingTrackOutput discardingTrackOutput;
-    private final AtomicReference<OutputMode> outputMode;
-
-    /** The mode of operation for the controlled track output. */
-    static enum OutputMode {
-      /** Pass samples through to the downstream track output. */
-      PASS_THROUGH,
-      /**
-       * Pass samples through to the downstream track output, but discard after the next sample
-       * metadata is received.
-       */
-      DISCARD_AFTER_NEXT_SAMPLE_METADATA,
-      /** Discards all samples. */
-      DISCARDING,
-    };
+    private final AtomicBoolean isDiscarding;
 
     ControlledTrackOutput(SampleQueue sampleQueue) {
       super(sampleQueue);
       this.sampleQueue = sampleQueue;
       this.discardingTrackOutput = new DiscardingTrackOutput();
-      this.outputMode = new AtomicReference<>(OutputMode.PASS_THROUGH);
+      this.isDiscarding = new AtomicBoolean(false);
     }
 
     @Override
@@ -1431,10 +1514,6 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
         int offset,
         @Nullable CryptoData cryptoData) {
       getCurrentOutput().sampleMetadata(timeUs, flags, size, offset, cryptoData);
-      if (outputMode.get() == OutputMode.DISCARD_AFTER_NEXT_SAMPLE_METADATA) {
-        sampleQueue.reset();
-        outputMode.set(OutputMode.DISCARDING);
-      }
     }
 
     /**
@@ -1443,10 +1522,7 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
      * @param selected Whether the track is selected.
      */
     void updateSelectionState(boolean selected) {
-      // Since there could still be some samples within the internal SampleDataQueue, we will be
-      // confident about releasing them all after the next sample metadata is received.
-      outputMode.set(
-          selected ? OutputMode.PASS_THROUGH : OutputMode.DISCARD_AFTER_NEXT_SAMPLE_METADATA);
+      isDiscarding.set(!selected);
       // In case the existing samples are taking too much memory, preventing further load, release
       // them optimistically.
       if (!selected) {
@@ -1456,11 +1532,11 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 
     /** Returns whether the track is selected. */
     boolean isSelected() {
-      return outputMode.get() == OutputMode.PASS_THROUGH;
+      return !isDiscarding.get();
     }
 
     private TrackOutput getCurrentOutput() {
-      return outputMode.get() == OutputMode.DISCARDING ? discardingTrackOutput : sampleQueue;
+      return isDiscarding.get() ? discardingTrackOutput : sampleQueue;
     }
   }
 }

@@ -21,6 +21,7 @@ import static androidx.media3.transformer.Transformer.PROGRESS_STATE_AVAILABLE;
 import static androidx.media3.transformer.Transformer.PROGRESS_STATE_NOT_STARTED;
 import static androidx.media3.transformer.Transformer.PROGRESS_STATE_UNAVAILABLE;
 import static androidx.media3.transformer.Transformer.PROGRESS_STATE_WAITING_FOR_AVAILABILITY;
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static java.lang.Math.round;
 import static java.lang.annotation.ElementType.TYPE_USE;
@@ -33,14 +34,12 @@ import androidx.media3.common.C;
 import androidx.media3.common.C.TrackType;
 import androidx.media3.common.DebugViewProvider;
 import androidx.media3.common.Format;
-import androidx.media3.common.SurfaceInfo;
 import androidx.media3.common.VideoFrameProcessor;
 import androidx.media3.common.util.Clock;
 import androidx.media3.common.util.HandlerWrapper;
+import androidx.media3.common.video.FrameProcessor;
 import androidx.media3.effect.DebugTraceUtil;
-import androidx.media3.effect.HardwareBufferFrame;
-import androidx.media3.effect.HardwareBufferFrameQueue;
-import androidx.media3.effect.RenderingPacketConsumer;
+import androidx.media3.effect.HardwareBufferJniWrapper;
 import androidx.media3.muxer.Muxer;
 import androidx.media3.transformer.ExportResult.ProcessedInput;
 import androidx.media3.transformer.Transformer.ProgressState;
@@ -137,12 +136,9 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
   private final DebugViewProvider debugViewProvider;
   private final Clock clock;
 
-  @Nullable
-  private final RenderingPacketConsumer<
-          ImmutableList<HardwareBufferFrame>, HardwareBufferFrameQueue>
-      packetProcessor;
+  @Nullable private final FrameProcessor.Factory frameProcessorFactory;
 
-  @Nullable RenderingPacketConsumer<HardwareBufferFrame, SurfaceInfo> packetRenderer;
+  @Nullable HardwareBufferJniWrapper hardwareBufferJniWrapper;
 
   @Nullable private final LogSessionId logSessionId;
   private final boolean applyMp4EditListTrim;
@@ -173,16 +169,17 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
       HandlerWrapper applicationHandler,
       DebugViewProvider debugViewProvider,
       Clock clock,
-      @Nullable
-          RenderingPacketConsumer<ImmutableList<HardwareBufferFrame>, HardwareBufferFrameQueue>
-              packetProcessor,
-      @Nullable RenderingPacketConsumer<HardwareBufferFrame, SurfaceInfo> packetRenderer,
+      @Nullable FrameProcessor.Factory frameProcessorFactory,
+      @Nullable HardwareBufferJniWrapper hardwareBufferJniWrapper,
       @Nullable LogSessionId logSessionId,
       boolean applyMp4EditListTrim,
       Muxer.Factory muxerFactory,
       String outputFilePath,
       String oldFilePath) {
     this.context = context;
+    checkArgument(
+        composition.sequences.size() == 1,
+        "Resume is supported only for single sequence composition");
     this.composition = composition;
     this.transformationRequest = transformationRequest;
     this.assetLoaderFactory = assetLoaderFactory;
@@ -196,8 +193,8 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
     this.applicationHandler = applicationHandler;
     this.debugViewProvider = debugViewProvider;
     this.clock = clock;
-    this.packetProcessor = packetProcessor;
-    this.packetRenderer = packetRenderer;
+    this.frameProcessorFactory = frameProcessorFactory;
+    this.hardwareBufferJniWrapper = hardwareBufferJniWrapper;
     this.logSessionId = logSessionId;
     this.applyMp4EditListTrim = applyMp4EditListTrim;
     this.muxerFactory = muxerFactory;
@@ -346,6 +343,13 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
   }
 
   private void processAudio() {
+    // Skip audio processing for video only composition. Resume operation is supported only for a
+    // single sequence composition.
+    if (!composition.sequences.get(0).trackTypes.contains(C.TRACK_TYPE_AUDIO)) {
+      listener.onCompleted(exportResultBuilder.build());
+      return;
+    }
+
     state = STATE_PROCESS_AUDIO;
 
     MuxerWrapper muxerWrapper =
@@ -417,8 +421,8 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
             applicationHandler,
             debugViewProvider,
             clock,
-            packetProcessor,
-            packetRenderer,
+            frameProcessorFactory,
+            hardwareBufferJniWrapper,
             initialTimestampOffsetUs,
             logSessionId,
             applyMp4EditListTrim,
@@ -516,11 +520,14 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
     }
 
     @Override
-    public void onEnded(long approximateDurationMs, long fileSizeBytes) {
-      exportResultBuilder
-          .setApproximateDurationMs(approximateDurationMs)
-          .setFileSizeBytes(fileSizeBytes);
+    public void onEnded(long approximateDurationMs) {
+      exportResultBuilder.setApproximateDurationMs(approximateDurationMs);
       checkNotNull(transformerInternal).endWithCompletion();
+    }
+
+    @Override
+    public void onFileSizeBytesAvailable(long fileSizeBytes) {
+      exportResultBuilder.setFileSizeBytes(fileSizeBytes);
     }
 
     @Override

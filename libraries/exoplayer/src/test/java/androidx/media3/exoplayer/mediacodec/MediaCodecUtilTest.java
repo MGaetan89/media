@@ -18,16 +18,16 @@ package androidx.media3.exoplayer.mediacodec;
 import static com.google.common.truth.Truth.assertThat;
 
 import android.media.MediaCodecInfo;
-import android.util.Pair;
-import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.ColorInfo;
 import androidx.media3.common.Format;
 import androidx.media3.common.MimeTypes;
+import androidx.media3.common.util.CodecSpecificDataUtil.MediaCodecProfileAndLevel;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import com.google.common.collect.ImmutableList;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.robolectric.shadows.ShadowBuild;
 
 /** Unit tests for {@link MediaCodecUtil}. */
 @RunWith(AndroidJUnit4.class)
@@ -260,13 +260,26 @@ public final class MediaCodecUtilTest {
         .isEqualTo(MimeTypes.VIDEO_AV1);
   }
 
+  @Test
+  public void getAlternativeCodecMimeType_withEac3JocFormatOnNonGoogleDevice_returnsEac3() {
+    ShadowBuild.setManufacturer("Samsung");
+    Format format = new Format.Builder().setSampleMimeType(MimeTypes.AUDIO_E_AC3_JOC).build();
+    assertThat(MediaCodecUtil.getAlternativeCodecMimeType(format)).isEqualTo(MimeTypes.AUDIO_E_AC3);
+  }
+
+  @Test
+  public void getAlternativeCodecMimeType_withEac3JocFormatOnGoogleDevice_returnsNull() {
+    ShadowBuild.setManufacturer("Google");
+    Format format = new Format.Builder().setSampleMimeType(MimeTypes.AUDIO_E_AC3_JOC).build();
+    assertThat(MediaCodecUtil.getAlternativeCodecMimeType(format)).isNull();
+  }
+
   private static void assertHevcBaseLayerCodecProfileAndLevelForFormat(
       Format format, int profile, int level) {
-    @Nullable
-    Pair<Integer, Integer> codecProfileAndLevel =
+    MediaCodecProfileAndLevel codecProfileAndLevel =
         MediaCodecUtil.getHevcBaseLayerCodecProfileAndLevel(format);
-    assertThat(codecProfileAndLevel).isNotNull();
-    assertThat(codecProfileAndLevel.first).isEqualTo(profile);
-    assertThat(codecProfileAndLevel.second).isEqualTo(level);
+    assertThat(codecProfileAndLevel.isSupportableByMediaCodec()).isTrue();
+    assertThat(codecProfileAndLevel.getProfile()).isEqualTo(profile);
+    assertThat(codecProfileAndLevel.getLevel()).isEqualTo(level);
   }
 }

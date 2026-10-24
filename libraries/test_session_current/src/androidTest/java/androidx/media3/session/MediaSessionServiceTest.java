@@ -41,6 +41,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
+import android.os.SystemClock;
 import android.service.notification.StatusBarNotification;
 import android.support.v4.media.session.MediaControllerCompat;
 import android.support.v4.media.session.MediaSessionCompat;
@@ -82,6 +83,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.After;
@@ -96,7 +98,7 @@ import org.junit.runner.RunWith;
 @MediumTest
 public class MediaSessionServiceTest {
 
-  private static final int WAIT_FOR_NOTIFICATION_UPDATE_MS = 100;
+  private static final int DEFAULT_POLL_INTERVAL_MS = 50;
 
   @ClassRule public static MainLooperTestRule mainLooperTestRule = new MainLooperTestRule();
 
@@ -153,13 +155,13 @@ public class MediaSessionServiceTest {
                   .setCallback(
                       new MediaSession.Callback() {
                         @Override
-                        public MediaSession.ConnectionResult onConnect(
+                        public ListenableFuture<ConnectionResult> onConnectAsync(
                             MediaSession session, ControllerInfo controller) {
                           if (!session.isMediaNotificationController(controller)) {
                             // The controllerInfo passed to MediaSession.Callback.onConnect()
                             onConnectControllerInfos.add(controllerInfo);
                           }
-                          return MediaSession.Callback.super.onConnect(session, controller);
+                          return MediaSession.Callback.super.onConnectAsync(session, controller);
                         }
 
                         @Override
@@ -185,13 +187,18 @@ public class MediaSessionServiceTest {
     // TestServiceRegistry is taken care of and cleaned up @After the test.
     service.setCleanupServiceRegistryOnDestroy(false);
     controller.setRepeatMode(Player.REPEAT_MODE_ONE);
-    List<ControllerInfo> connectedControllerManagerControllerInfos = new ArrayList<>();
-    for (ControllerInfo controllerInfo : session.get().getConnectedControllers()) {
-      if (!session.get().isMediaNotificationController(controllerInfo)) {
-        // The controllerInfo in the connected controller manager.
-        connectedControllerManagerControllerInfos.add(controllerInfo);
-      }
-    }
+    List<ControllerInfo> connectedControllerManagerControllerInfos =
+        new TestHandler(Looper.getMainLooper())
+            .postAndSync(
+                () -> {
+                  List<ControllerInfo> controllers = new ArrayList<>();
+                  for (ControllerInfo controllerInfo : session.get().getConnectedControllers()) {
+                    if (!session.get().isMediaNotificationController(controllerInfo)) {
+                      controllers.add(controllerInfo);
+                    }
+                  }
+                  return controllers;
+                });
 
     // The controller that was bound to the service unbinds when released. Because the service was
     // never started (as in `onStartCommand()` was never called), the service is immediately
@@ -315,20 +322,28 @@ public class MediaSessionServiceTest {
             .setCallback(
                 new MediaSession.Callback() {
                   @Override
-                  public MediaSession.ConnectionResult onConnect(
+                  public ListenableFuture<ConnectionResult> onConnectAsync(
                       MediaSession session, ControllerInfo controller) {
                     controllerInfoList.add(controller);
                     if (session.isMediaNotificationController(controller)) {
                       latch.countDown();
-                      return new MediaSession.ConnectionResult.AcceptedResultBuilder(session)
-                          .setAvailableSessionCommands(
-                              SessionCommands.EMPTY.buildUpon().add(command1).add(command3).build())
-                          .setAvailablePlayerCommands(Player.Commands.EMPTY)
-                          .setCustomLayout(ImmutableList.of(button1, button3))
-                          .build();
+                      return immediateFuture(
+                          new MediaSession.ConnectionResult.AcceptedResultBuilder(
+                                  session, controller)
+                              .setAvailableSessionCommands(
+                                  SessionCommands.EMPTY
+                                      .buildUpon()
+                                      .add(command1)
+                                      .add(command3)
+                                      .build())
+                              .setAvailablePlayerCommands(Player.Commands.EMPTY)
+                              .setCustomLayout(ImmutableList.of(button1, button3))
+                              .build());
                     }
                     latch.countDown();
-                    return new MediaSession.ConnectionResult.AcceptedResultBuilder(session).build();
+                    return immediateFuture(
+                        new MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller)
+                            .build());
                   }
                 })
             .build();
@@ -431,20 +446,28 @@ public class MediaSessionServiceTest {
             .setCallback(
                 new MediaSession.Callback() {
                   @Override
-                  public MediaSession.ConnectionResult onConnect(
+                  public ListenableFuture<ConnectionResult> onConnectAsync(
                       MediaSession session, ControllerInfo controller) {
                     controllerInfoList.add(controller);
                     if (session.isMediaNotificationController(controller)) {
                       latch.countDown();
-                      return new MediaSession.ConnectionResult.AcceptedResultBuilder(session)
-                          .setAvailableSessionCommands(
-                              SessionCommands.EMPTY.buildUpon().add(command1).add(command3).build())
-                          .setAvailablePlayerCommands(Player.Commands.EMPTY)
-                          .setMediaButtonPreferences(ImmutableList.of(button1, button3))
-                          .build();
+                      return immediateFuture(
+                          new MediaSession.ConnectionResult.AcceptedResultBuilder(
+                                  session, controller)
+                              .setAvailableSessionCommands(
+                                  SessionCommands.EMPTY
+                                      .buildUpon()
+                                      .add(command1)
+                                      .add(command3)
+                                      .build())
+                              .setAvailablePlayerCommands(Player.Commands.EMPTY)
+                              .setMediaButtonPreferences(ImmutableList.of(button1, button3))
+                              .build());
                     }
                     latch.countDown();
-                    return new MediaSession.ConnectionResult.AcceptedResultBuilder(session).build();
+                    return immediateFuture(
+                        new MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller)
+                            .build());
                   }
                 })
             .build();
@@ -705,16 +728,17 @@ public class MediaSessionServiceTest {
                           exoPlayer,
                           new MediaLibrarySession.Callback() {
                             @Override
-                            public ConnectionResult onConnect(
+                            public ListenableFuture<ConnectionResult> onConnectAsync(
                                 MediaSession session, ControllerInfo controller) {
-                              return new AcceptedResultBuilder(session)
-                                  .setAvailableSessionCommands(
-                                      new SessionCommands.Builder()
-                                          .addAllPredefinedCommands()
-                                          .addSessionCommands(
-                                              ImmutableList.of(expectedCustomCommand))
-                                          .build())
-                                  .build();
+                              return immediateFuture(
+                                  new AcceptedResultBuilder(session, controller)
+                                      .setAvailableSessionCommands(
+                                          new SessionCommands.Builder()
+                                              .addAllPredefinedCommands()
+                                              .addSessionCommands(
+                                                  ImmutableList.of(expectedCustomCommand))
+                                              .build())
+                                      .build());
                             }
 
                             @Override
@@ -784,7 +808,7 @@ public class MediaSessionServiceTest {
   /**
    * Tests whether the controller is connected to the session which is returned from {@link
    * MediaSessionService#onGetSession(ControllerInfo)}. Also checks whether the connection hints are
-   * properly passed to {@link MediaSession.Callback#onConnect(MediaSession, ControllerInfo)}.
+   * properly passed to {@link MediaSession.Callback#onConnectAsync(MediaSession, ControllerInfo)}.
    */
   @Test
   public void onGetSession_returnsSession() throws Exception {
@@ -804,15 +828,16 @@ public class MediaSessionServiceTest {
                 .setCallback(
                     new MediaSession.Callback() {
                       @Override
-                      public MediaSession.ConnectionResult onConnect(
+                      public ListenableFuture<MediaSession.ConnectionResult> onConnectAsync(
                           MediaSession session, ControllerInfo controller) {
                         if (SUPPORT_APP_PACKAGE_NAME.equals(controller.getPackageName())
                             && TestUtils.equals(testHints, controller.getConnectionHints())) {
                           controllerInfoList.add(controller);
                           latch.countDown();
                         }
-                        return MediaSession.ConnectionResult.accept(
-                            SessionCommands.EMPTY, Player.Commands.EMPTY);
+                        return immediateFuture(
+                            MediaSession.ConnectionResult.accept(
+                                SessionCommands.EMPTY, Player.Commands.EMPTY));
                       }
                     })
                 .build());
@@ -1041,9 +1066,12 @@ public class MediaSessionServiceTest {
     runPendingMainThreadMessages();
 
     MainLooperTestRule.runOnMainSync(player::play);
-    Thread.sleep(WAIT_FOR_NOTIFICATION_UPDATE_MS);
     int notificationFlags =
-        getNotification(DefaultMediaNotificationProvider.DEFAULT_NOTIFICATION_ID).flags;
+        getNotificationWithExpectedForegroundServiceFlag(
+                DefaultMediaNotificationProvider.DEFAULT_NOTIFICATION_ID,
+                /* expectForegroundService= */ true,
+                TIMEOUT_MS)
+            .flags;
     mediaSession.release();
     service.blockUntilAllControllersUnbind(TIMEOUT_MS);
 
@@ -1077,13 +1105,19 @@ public class MediaSessionServiceTest {
     runPendingMainThreadMessages();
 
     MainLooperTestRule.runOnMainSync(player::pause);
-    Thread.sleep(WAIT_FOR_NOTIFICATION_UPDATE_MS);
     int notificationFlagsAfterPause =
-        getNotification(DefaultMediaNotificationProvider.DEFAULT_NOTIFICATION_ID).flags;
+        getNotificationWithExpectedForegroundServiceFlag(
+                DefaultMediaNotificationProvider.DEFAULT_NOTIFICATION_ID,
+                /* expectForegroundService= */ true,
+                TIMEOUT_MS)
+            .flags;
     Thread.sleep(foregroundServiceTimeoutMs);
-    Thread.sleep(WAIT_FOR_NOTIFICATION_UPDATE_MS);
     int notificationFlagsAfterTimeout =
-        getNotification(DefaultMediaNotificationProvider.DEFAULT_NOTIFICATION_ID).flags;
+        getNotificationWithExpectedForegroundServiceFlag(
+                DefaultMediaNotificationProvider.DEFAULT_NOTIFICATION_ID,
+                /* expectForegroundService= */ false,
+                TIMEOUT_MS)
+            .flags;
     mediaSession.release();
     service.blockUntilAllControllersUnbind(TIMEOUT_MS);
 
@@ -1115,9 +1149,12 @@ public class MediaSessionServiceTest {
     runPendingMainThreadMessages();
 
     MainLooperTestRule.runOnMainSync(service::pauseAllPlayersAndStopSelf);
-    Thread.sleep(WAIT_FOR_NOTIFICATION_UPDATE_MS);
     int notificationFlags =
-        getNotification(DefaultMediaNotificationProvider.DEFAULT_NOTIFICATION_ID).flags;
+        getNotificationWithExpectedForegroundServiceFlag(
+                DefaultMediaNotificationProvider.DEFAULT_NOTIFICATION_ID,
+                /* expectForegroundService= */ false,
+                TIMEOUT_MS)
+            .flags;
     mediaSession.release();
     service.blockUntilAllControllersUnbind(TIMEOUT_MS);
 
@@ -1178,8 +1215,15 @@ public class MediaSessionServiceTest {
         FileInputStream fileInputStream = new FileInputStream(command.getFileDescriptor());
         InputStreamReader inputStreamReader = new InputStreamReader(fileInputStream, UTF_8);
         BufferedReader reader = new BufferedReader(inputStreamReader)) {
-      assertThat(reader.lines().anyMatch(line -> line.contains("Process: com.android.systemui")))
-          .isFalse();
+      boolean containsSystemUi = false;
+      String line;
+      while ((line = reader.readLine()) != null) {
+        if (line.contains("Process: com.android.systemui")) {
+          containsSystemUi = true;
+          break;
+        }
+      }
+      assertThat(containsSystemUi).isFalse();
     }
   }
 
@@ -1208,5 +1252,22 @@ public class MediaSessionServiceTest {
       }
     }
     return null;
+  }
+
+  private Notification getNotificationWithExpectedForegroundServiceFlag(
+      int notificationId, boolean expectForegroundService, long timeoutMs) throws Exception {
+    long startTimeMs = SystemClock.elapsedRealtime();
+    int expectedFlag = expectForegroundService ? Notification.FLAG_FOREGROUND_SERVICE : 0;
+    while (SystemClock.elapsedRealtime() - startTimeMs < timeoutMs) {
+      Notification notification = getNotification(notificationId);
+      if (notification != null
+          && (notification.flags & Notification.FLAG_FOREGROUND_SERVICE) == expectedFlag) {
+        return notification;
+      }
+      Thread.sleep(DEFAULT_POLL_INTERVAL_MS);
+    }
+    throw new TimeoutException(
+        "Timeout waiting for notification flags to match expectForegroundService="
+            + expectForegroundService);
   }
 }

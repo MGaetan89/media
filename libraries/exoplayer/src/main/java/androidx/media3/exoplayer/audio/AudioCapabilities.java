@@ -40,6 +40,7 @@ import androidx.annotation.VisibleForTesting;
 import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.C;
 import androidx.media3.common.Format;
+import androidx.media3.common.MediaLibraryInfo;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.audio.AudioManagerCompat;
 import androidx.media3.common.util.UnstableApi;
@@ -415,17 +416,17 @@ public final class AudioCapabilities {
           audioProfile.getMaxSupportedChannelCountForPassthrough(sampleRate, audioAttributes);
     } else {
       channelCount = format.channelCount;
-      if (format.sampleMimeType.equals(MimeTypes.AUDIO_DTS_X) && SDK_INT < 33) {
+      if (format.sampleMimeType.equals(MimeTypes.AUDIO_DTS_UHD_P2) && SDK_INT < 33) {
         // Some DTS:X TVs reports ACTION_HDMI_AUDIO_PLUG.EXTRA_MAX_CHANNEL_COUNT as 8
         // instead of 10. See https://github.com/androidx/media/issues/396
         if (channelCount > 10) {
           return null;
         }
-      } else if (!audioProfile.supportsChannelCount(channelCount)) {
+      } else if (!audioProfile.supportsChannelConfig(channelCount, format)) {
         return null;
       }
     }
-    int channelConfig = getChannelConfigForPassthrough(channelCount);
+    int channelConfig = getChannelConfigForPassthrough(channelCount, format);
     if (channelConfig == AudioFormat.CHANNEL_INVALID) {
       return null;
     }
@@ -473,7 +474,7 @@ public final class AudioCapabilities {
     return Build.MANUFACTURER.equals("Amazon") || Build.MANUFACTURER.equals("Xiaomi");
   }
 
-  private static int getChannelConfigForPassthrough(int channelCount) {
+  private static int getChannelConfigForPassthrough(int channelCount, Format format) {
     if (SDK_INT <= 28) {
       // In passthrough mode the channel count used to configure the audio track doesn't affect how
       // the stream is handled, except that some devices do overly-strict channel configuration
@@ -488,11 +489,16 @@ public final class AudioCapabilities {
 
     // Workaround for Nexus Player not reporting support for mono passthrough. See
     // [Internal: b/34268671].
-    if (SDK_INT <= 26 && "fugu".equals(Build.DEVICE) && channelCount == 1) {
+    if (MediaLibraryInfo.enableWorkarounds()
+        && SDK_INT <= 26
+        && "fugu".equals(Build.DEVICE)
+        && channelCount == 1) {
       channelCount = 2;
     }
 
-    return Util.getAudioTrackChannelConfig(channelCount);
+    return (format.channelMask != Format.NO_VALUE && format.channelCount == channelCount)
+        ? format.channelMask
+        : Util.getAudioTrackChannelConfig(channelCount);
   }
 
   // Suppression needed for IntDef casting.
@@ -590,12 +596,15 @@ public final class AudioCapabilities {
       this.channelMasks = null;
     }
 
-    public boolean supportsChannelCount(int channelCount) {
+    private boolean supportsChannelConfig(int channelCount, Format format) {
       if (channelMasks == null) {
         return channelCount <= maxChannelCount;
       }
 
-      int channelMask = Util.getAudioTrackChannelConfig(channelCount);
+      int channelMask =
+          (format.channelMask != Format.NO_VALUE && format.channelCount == channelCount)
+              ? format.channelMask
+              : Util.getAudioTrackChannelConfig(channelCount);
       if (channelMask == AudioFormat.CHANNEL_INVALID) {
         return false;
       }

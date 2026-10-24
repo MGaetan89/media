@@ -15,17 +15,20 @@
  */
 package androidx.media3.transformer;
 
-import static androidx.media3.test.utils.TestUtil.createExternalCacheFile;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static java.util.concurrent.TimeUnit.SECONDS;
+import static org.junit.Assume.assumeFalse;
 import static org.junit.Assume.assumeTrue;
 
+import android.Manifest;
+import android.annotation.SuppressLint;
 import android.content.Context;
 import android.net.ConnectivityManager;
 import android.net.NetworkCapabilities;
 import android.net.Uri;
 import androidx.annotation.Nullable;
+import androidx.annotation.RequiresPermission;
 import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.util.Clock;
@@ -35,6 +38,7 @@ import androidx.media3.common.util.SystemClock;
 import androidx.media3.effect.DebugTraceUtil;
 import androidx.media3.test.utils.SsimHelper;
 import androidx.media3.test.utils.TestSummaryLogger;
+import androidx.media3.test.utils.TestUtil;
 import androidx.media3.transformer.Transformer.Listener;
 import androidx.test.platform.app.InstrumentationRegistry;
 import com.google.common.collect.ImmutableList;
@@ -454,13 +458,7 @@ public class TransformerAndroidTestRunner {
       @Nullable FallbackDetails fallbackDetails,
       File outputVideoFile)
       throws InterruptedException {
-    if (fallbackDetails != null && fallbackDetails.fallbackOutputHeight != C.LENGTH_UNSET) {
-      Log.i(
-          TAG,
-          testId
-              + ": Skipping SSIM calculation because an encoder resolution fallback was applied.");
-      return;
-    }
+    assumeFalse(fallbackDetails != null && fallbackDetails.fallbackOutputHeight != C.LENGTH_UNSET);
     try {
       MediaItem mediaItem = extractMediaItem(mediaInput);
       double ssim =
@@ -488,7 +486,7 @@ public class TransformerAndroidTestRunner {
   }
 
   private File createOutputFile(String testId) throws IOException {
-    return createExternalCacheFile(
+    return TestUtil.createInternalCacheFile(
         context, /* fileName= */ testId + "-" + Clock.DEFAULT.elapsedRealtime() + "-output.mp4");
   }
 
@@ -585,6 +583,7 @@ public class TransformerAndroidTestRunner {
     }
   }
 
+  @SuppressLint("MissingPermission")
   private static void checkNetworkAccessForMediaInput(Context context, Object mediaInput) {
     ImmutableList.Builder<MediaItem> mediaItemsBuilder = new ImmutableList.Builder<>();
     if (mediaInput instanceof Composition) {
@@ -622,6 +621,7 @@ public class TransformerAndroidTestRunner {
   }
 
   /** Returns whether the context is connected to the network. */
+  @RequiresPermission(Manifest.permission.ACCESS_NETWORK_STATE)
   private static boolean hasNetworkConnection(Context context) {
     ConnectivityManager connectivityManager =
         (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);

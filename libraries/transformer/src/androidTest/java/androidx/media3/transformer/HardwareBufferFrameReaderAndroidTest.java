@@ -15,7 +15,7 @@
  */
 package androidx.media3.transformer;
 
-import static androidx.media3.test.utils.AssetInfo.MP4_ASSET;
+import static androidx.media3.test.utils.AssetInfo.MP4_ADVANCED_ASSET;
 import static androidx.media3.transformer.EditedMediaItemSequence.withAudioFrom;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
@@ -43,6 +43,7 @@ import androidx.test.filters.SdkSuppress;
 import com.google.common.collect.ImmutableList;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.After;
 import org.junit.Before;
@@ -73,7 +74,7 @@ public class HardwareBufferFrameReaderAndroidTest {
   @Before
   public void setUp() {
     EditedMediaItem editedMediaItem =
-        new EditedMediaItem.Builder(MediaItem.fromUri(MP4_ASSET.uri)).build();
+        new EditedMediaItem.Builder(MediaItem.fromUri(MP4_ADVANCED_ASSET.uri)).build();
     EditedMediaItemSequence sequence = withAudioFrom(ImmutableList.of(editedMediaItem));
     composition = new Composition.Builder(sequence).build();
     handlerThread = new HandlerThread("HardwareBufferFrameReaderTest");
@@ -88,6 +89,7 @@ public class HardwareBufferFrameReaderAndroidTest {
             hardwareBufferFrame -> receivedFrames.add(hardwareBufferFrame),
             handlerThread.getLooper(),
             /* defaultSurfacePixelFormat= */ ImageFormat.YUV_420_888,
+            new DefaultImageReaderAdapter.Factory(),
             e -> hardwareBufferFrameReaderException.set(e),
             SystemClock.DEFAULT.createHandler(Util.getCurrentOrMainLooper(), null));
   }
@@ -101,13 +103,14 @@ public class HardwareBufferFrameReaderAndroidTest {
   @Test
   public void frameReader_queueFrameViaSurface_receivesFrame() throws Exception {
     hardwareBufferFrameReader.queueFrameViaSurface(
-        /* presentationTimeUs= */ 0, /* indexOfItem= */ 0, TEST_FORMAT);
+        /* presentationTimeUs= */ 0, /* sequenceOffsetUs= */ 0, /* indexOfItem= */ 0, TEST_FORMAT);
     produceFrameToFrameReaderSurface(/* presentationTimeUs= */ 0);
 
     HardwareBufferFrame receivedFrame = receivedFrames.poll(TEST_TIMEOUT_MS, MILLISECONDS);
 
     assertThat(hardwareBufferFrameReaderException.get()).isNull();
     assertThat(receivedFrame.presentationTimeUs).isEqualTo(0);
+    assertThat(receivedFrame.sequencePresentationTimeUs).isEqualTo(0);
     assertThat(receivedFrame.format).isEqualTo(TEST_FORMAT);
     assertThat(receivedFrame.internalFrame).isNotNull();
     assertThat(receivedFrame.getMetadata()).isInstanceOf(CompositionFrameMetadata.class);
@@ -122,7 +125,10 @@ public class HardwareBufferFrameReaderAndroidTest {
   @SdkSuppress(minSdkVersion = 28)
   public void frameReader_releaseSurfaceFrame_closesTheHardwareBuffer() throws Exception {
     hardwareBufferFrameReader.queueFrameViaSurface(
-        /* presentationTimeUs= */ 1234, /* indexOfItem= */ 0, TEST_FORMAT);
+        /* presentationTimeUs= */ 1234,
+        /* sequenceOffsetUs= */ 0,
+        /* indexOfItem= */ 0,
+        TEST_FORMAT);
     produceFrameToFrameReaderSurface(/* presentationTimeUs= */ 1234);
     HardwareBufferFrame receivedFrame = receivedFrames.poll(TEST_TIMEOUT_MS, MILLISECONDS);
     HardwareBuffer hardwareBuffer = checkNotNull(receivedFrame.hardwareBuffer);
@@ -141,6 +147,7 @@ public class HardwareBufferFrameReaderAndroidTest {
         Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
             .copy(Config.HARDWARE, /* isMutable= */ false),
         new ConstantRateTimestampIterator(/* durationUs= */ 1_000_000, /* frameRate= */ 30f),
+        /* sequenceOffsetUs= */ 0,
         /* indexOfItem= */ 1);
     HardwareBufferFrame receivedFrame = receivedFrames.poll(TEST_TIMEOUT_MS, MILLISECONDS);
     HardwareBuffer hardwareBuffer = checkNotNull(receivedFrame.hardwareBuffer);
@@ -156,7 +163,10 @@ public class HardwareBufferFrameReaderAndroidTest {
   @Test
   public void frameReader_releaseOutputFrame_freesUpCapacity() throws Exception {
     hardwareBufferFrameReader.queueFrameViaSurface(
-        /* presentationTimeUs= */ 1234, /* indexOfItem= */ 0, TEST_FORMAT);
+        /* presentationTimeUs= */ 1234,
+        /* sequenceOffsetUs= */ 0,
+        /* indexOfItem= */ 0,
+        TEST_FORMAT);
     checkState(!hardwareBufferFrameReader.canAcceptFrameViaSurface());
     produceFrameToFrameReaderSurface(/* presentationTimeUs= */ 1234);
     HardwareBufferFrame receivedFrame = receivedFrames.poll(TEST_TIMEOUT_MS, MILLISECONDS);
@@ -166,6 +176,25 @@ public class HardwareBufferFrameReaderAndroidTest {
 
     assertThat(hardwareBufferFrameReader.canAcceptFrameViaSurface()).isTrue();
     assertThat(hardwareBufferFrameReaderException.get()).isNull();
+  }
+
+  @Test
+  public void frameReader_releaseOutputFrame_callsWakeupListener() throws Exception {
+    AtomicBoolean onWakeupCalled = new AtomicBoolean();
+    hardwareBufferFrameReader.queueFrameViaSurface(
+        /* presentationTimeUs= */ 1234,
+        /* sequenceOffsetUs= */ 0,
+        /* indexOfItem= */ 0,
+        TEST_FORMAT);
+    hardwareBufferFrameReader.addRendererWakeupListener(() -> onWakeupCalled.set(true));
+    assertThat(hardwareBufferFrameReader.canAcceptFrameViaSurface()).isFalse();
+    produceFrameToFrameReaderSurface(/* presentationTimeUs= */ 1234);
+    HardwareBufferFrame receivedFrame = receivedFrames.poll(TEST_TIMEOUT_MS, MILLISECONDS);
+
+    receivedFrame.release(/* releaseFence= */ null);
+    handlerThread.join(TEST_TIMEOUT_MS);
+
+    assertThat(onWakeupCalled.get()).isTrue();
   }
 
   @Test
@@ -186,10 +215,14 @@ public class HardwareBufferFrameReaderAndroidTest {
             .setFrameRate(/* frameRate= */ 30)
             .build();
     hardwareBufferFrameReader.queueFrameViaSurface(
-        /* presentationTimeUs= */ 1234, /* indexOfItem= */ 0, TEST_FORMAT);
+        /* presentationTimeUs= */ 1234,
+        /* sequenceOffsetUs= */ 0,
+        /* indexOfItem= */ 0,
+        TEST_FORMAT);
     hardwareBufferFrameReader.outputBitmap(
         Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888),
         new ConstantRateTimestampIterator(/* durationUs= */ 1_000_000, /* frameRate= */ 30f),
+        /* sequenceOffsetUs= */ 0,
         /* indexOfItem= */ 1);
 
     produceFrameToFrameReaderSurface(/* presentationTimeUs= */ 1234);
@@ -212,7 +245,11 @@ public class HardwareBufferFrameReaderAndroidTest {
   public void frameReader_queueFrameViaSurfaceThenQueueEndOfStream_receivesFrameThenEos()
       throws Exception {
     long frameTimeUs = 1234;
-    hardwareBufferFrameReader.queueFrameViaSurface(frameTimeUs, /* indexOfItem= */ 0, TEST_FORMAT);
+    hardwareBufferFrameReader.queueFrameViaSurface(
+        /* presentationTimeUs= */ frameTimeUs,
+        /* sequenceOffsetUs= */ 0,
+        /* indexOfItem= */ 0,
+        TEST_FORMAT);
     hardwareBufferFrameReader.queueEndOfStream();
 
     produceFrameToFrameReaderSurface(frameTimeUs);
@@ -224,6 +261,7 @@ public class HardwareBufferFrameReaderAndroidTest {
     assertThat(hardwareBufferFrameReaderException.get()).isNull();
     assertThat(firstFrame).isNotNull();
     assertThat(firstFrame.presentationTimeUs).isEqualTo(frameTimeUs);
+    assertThat(firstFrame.sequencePresentationTimeUs).isEqualTo(frameTimeUs);
     assertThat(firstFrame.format).isEqualTo(TEST_FORMAT);
     assertThat(secondFrame).isEqualTo(HardwareBufferFrame.END_OF_STREAM_FRAME);
     assertThat(shouldBeNull).isNull();
@@ -234,7 +272,11 @@ public class HardwareBufferFrameReaderAndroidTest {
       throws Exception {
     long frameTimeUs = 5678;
     hardwareBufferFrameReader.queueEndOfStream();
-    hardwareBufferFrameReader.queueFrameViaSurface(frameTimeUs, /* indexOfItem= */ 0, TEST_FORMAT);
+    hardwareBufferFrameReader.queueFrameViaSurface(
+        /* presentationTimeUs= */ frameTimeUs,
+        /* sequenceOffsetUs= */ 0,
+        /* indexOfItem= */ 0,
+        TEST_FORMAT);
 
     HardwareBufferFrame receivedEos = receivedFrames.poll(TEST_TIMEOUT_MS, MILLISECONDS);
 
@@ -249,6 +291,7 @@ public class HardwareBufferFrameReaderAndroidTest {
     assertThat(hardwareBufferFrameReaderException.get()).isNull();
     assertThat(firstFrame).isNotNull();
     assertThat(firstFrame.presentationTimeUs).isEqualTo(frameTimeUs);
+    assertThat(firstFrame.sequencePresentationTimeUs).isEqualTo(frameTimeUs);
     assertThat(firstFrame.format).isEqualTo(TEST_FORMAT);
     assertThat(shouldBeNull).isNull();
   }
@@ -265,15 +308,28 @@ public class HardwareBufferFrameReaderAndroidTest {
     Format format3 =
         new Format.Builder().setWidth(30).setColorInfo(ColorInfo.SDR_BT709_LIMITED).build();
 
-    hardwareBufferFrameReader.queueFrameViaSurface(frameTimeUs1, /* indexOfItem= */ 0, format1);
-    hardwareBufferFrameReader.queueFrameViaSurface(frameTimeUs2, /* indexOfItem= */ 0, format2);
+    hardwareBufferFrameReader.queueFrameViaSurface(
+        /* presentationTimeUs= */ frameTimeUs1,
+        /* sequenceOffsetUs= */ 0,
+        /* indexOfItem= */ 0,
+        format1);
+    hardwareBufferFrameReader.queueFrameViaSurface(
+        /* presentationTimeUs= */ frameTimeUs2,
+        /* sequenceOffsetUs= */ 0,
+        /* indexOfItem= */ 0,
+        format2);
     hardwareBufferFrameReader.queueEndOfStream();
-    hardwareBufferFrameReader.queueFrameViaSurface(frameTimeUs3, /* indexOfItem= */ 0, format3);
+    hardwareBufferFrameReader.queueFrameViaSurface(
+        /* presentationTimeUs= */ frameTimeUs3,
+        /* sequenceOffsetUs= */ 0,
+        /* indexOfItem= */ 0,
+        format3);
 
     produceFrameToFrameReaderSurface(frameTimeUs1);
     HardwareBufferFrame recFrame1 = receivedFrames.poll(TEST_TIMEOUT_MS, MILLISECONDS);
     assertThat(recFrame1).isNotNull();
     assertThat(recFrame1.presentationTimeUs).isEqualTo(frameTimeUs1);
+    assertThat(recFrame1.sequencePresentationTimeUs).isEqualTo(frameTimeUs1);
     assertThat(recFrame1.format).isEqualTo(format1);
     recFrame1.release(/* releaseFence= */ null);
 
@@ -281,6 +337,7 @@ public class HardwareBufferFrameReaderAndroidTest {
     HardwareBufferFrame recFrame2 = receivedFrames.poll(TEST_TIMEOUT_MS, MILLISECONDS);
     assertThat(recFrame2).isNotNull();
     assertThat(recFrame2.presentationTimeUs).isEqualTo(frameTimeUs2);
+    assertThat(recFrame2.sequencePresentationTimeUs).isEqualTo(frameTimeUs2);
     assertThat(recFrame2.format).isEqualTo(format2);
     recFrame2.release(/* releaseFence= */ null);
 
@@ -291,6 +348,7 @@ public class HardwareBufferFrameReaderAndroidTest {
     HardwareBufferFrame recFrame3 = receivedFrames.poll(TEST_TIMEOUT_MS, MILLISECONDS);
     assertThat(recFrame3).isNotNull();
     assertThat(recFrame3.presentationTimeUs).isEqualTo(frameTimeUs3);
+    assertThat(recFrame3.sequencePresentationTimeUs).isEqualTo(frameTimeUs3);
     assertThat(recFrame3.format).isEqualTo(format3);
     recFrame3.release(/* releaseFence= */ null);
 
@@ -306,7 +364,10 @@ public class HardwareBufferFrameReaderAndroidTest {
         new Format.Builder().setWidth(10).setColorInfo(ColorInfo.SDR_BT709_LIMITED).build();
 
     hardwareBufferFrameReader.queueFrameViaSurface(
-        frameTimeUs1, /* indexOfItem= */ 0, nullColorInfoFormat);
+        /* presentationTimeUs= */ frameTimeUs1,
+        /* sequenceOffsetUs= */ 0,
+        /* indexOfItem= */ 0,
+        nullColorInfoFormat);
     produceFrameToFrameReaderSurface(frameTimeUs1);
 
     HardwareBufferFrame recFrame1 = receivedFrames.poll(TEST_TIMEOUT_MS, MILLISECONDS);
@@ -321,16 +382,19 @@ public class HardwareBufferFrameReaderAndroidTest {
             .setWidth(10)
             .setColorInfo(
                 new ColorInfo.Builder()
-                    .setColorSpace(C.INDEX_UNSET)
-                    .setColorRange(C.INDEX_UNSET)
-                    .setColorTransfer(C.INDEX_UNSET)
+                    .setColorSpace(Format.NO_VALUE)
+                    .setColorRange(Format.NO_VALUE)
+                    .setColorTransfer(Format.NO_VALUE)
                     .build())
             .build();
     Format expectedFormat =
         new Format.Builder().setWidth(10).setColorInfo(ColorInfo.SDR_BT709_LIMITED).build();
 
     hardwareBufferFrameReader.queueFrameViaSurface(
-        frameTimeUs1, /* indexOfItem= */ 0, unsetColorSpaceFormat);
+        /* presentationTimeUs= */ frameTimeUs1,
+        /* sequenceOffsetUs= */ 0,
+        /* indexOfItem= */ 0,
+        unsetColorSpaceFormat);
     produceFrameToFrameReaderSurface(frameTimeUs1);
 
     HardwareBufferFrame recFrame1 = receivedFrames.poll(TEST_TIMEOUT_MS, MILLISECONDS);

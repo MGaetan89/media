@@ -30,13 +30,13 @@ import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
-import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
 
 import android.annotation.SuppressLint;
 import android.content.Context;
 import android.graphics.Bitmap;
+import android.graphics.Color;
 import android.graphics.ImageFormat;
 import android.os.HandlerThread;
 import android.os.Looper;
@@ -47,6 +47,7 @@ import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import androidx.annotation.IntRange;
 import androidx.annotation.Nullable;
+import androidx.annotation.RequiresApi;
 import androidx.annotation.RestrictTo;
 import androidx.annotation.RestrictTo.Scope;
 import androidx.annotation.VisibleForTesting;
@@ -76,17 +77,23 @@ import androidx.media3.common.util.ExperimentalApi;
 import androidx.media3.common.util.GlUtil;
 import androidx.media3.common.util.HandlerWrapper;
 import androidx.media3.common.util.Log;
+import androidx.media3.common.util.NullableType;
 import androidx.media3.common.util.Size;
 import androidx.media3.common.util.Util;
+import androidx.media3.common.video.Frame;
+import androidx.media3.common.video.FrameProcessor;
+import androidx.media3.common.video.SurfaceHolderFrameWriter;
+import androidx.media3.common.video.SyncFenceWrapper;
+import androidx.media3.effect.BitmapToHardwareBufferProcessor;
 import androidx.media3.effect.DebugTraceUtil;
 import androidx.media3.effect.DefaultGlObjectsProvider;
 import androidx.media3.effect.DefaultVideoFrameProcessor;
 import androidx.media3.effect.HardwareBufferFrame;
-import androidx.media3.effect.PacketConsumer;
-import androidx.media3.effect.PacketConsumerUtil;
-import androidx.media3.effect.ProcessAndRenderToSurfaceConsumer;
+import androidx.media3.effect.HardwareBufferFrameProcessor;
+import androidx.media3.effect.HardwareBufferFrameQueue;
+import androidx.media3.effect.HardwareBufferJniWrapper;
+import androidx.media3.effect.RenderingPacketConsumer;
 import androidx.media3.effect.SingleInputVideoGraph;
-import androidx.media3.effect.SurfaceHolderHardwareBufferFrameQueue;
 import androidx.media3.effect.TimestampAdjustment;
 import androidx.media3.exoplayer.DecoderCounters;
 import androidx.media3.exoplayer.DefaultLoadControl;
@@ -117,7 +124,11 @@ import androidx.media3.exoplayer.video.PlaybackVideoGraphWrapper;
 import androidx.media3.exoplayer.video.VideoFrameMetadataListener;
 import androidx.media3.exoplayer.video.VideoFrameReleaseControl;
 import androidx.media3.exoplayer.video.VideoSink;
+import androidx.media3.extractor.DefaultExtractorsFactory;
+import androidx.media3.extractor.amr.AmrExtractor;
+import androidx.media3.extractor.ts.AdtsExtractor;
 import com.google.common.base.Supplier;
+import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
@@ -128,6 +139,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 
@@ -168,11 +180,19 @@ public final class CompositionPlayer extends SimpleBasePlayer {
     private AudioAttributes audioAttributes;
     private boolean handleAudioFocus;
     private VideoGraph.@MonotonicNonNull Factory videoGraphFactory;
-    private PacketConsumer.@MonotonicNonNull Factory<ImmutableList<HardwareBufferFrame>>
-        packetConsumerFactory;
-    @Nullable private HardwareBufferFrameProcessor hardwareBufferPostProcessor;
+
+    @Nullable
+    private RenderingPacketConsumer<ImmutableList<HardwareBufferFrame>, HardwareBufferFrameQueue>
+        packetProcessor;
+
+    private FrameProcessor.@MonotonicNonNull Factory frameProcessorFactory;
+
+    @Nullable private HardwareBufferJniWrapper hardwareBufferJniWrapper;
+
+    private Supplier<ImageReaderAdapter.Factory> imageReaderAdapterFactorySupplier;
 
     private boolean videoPrewarmingEnabled;
+    private boolean perStreamMediaProgressionEnabled;
     private boolean enableReplayableCache;
     private long lateThresholdToDropInputUs;
     private boolean built;
@@ -188,12 +208,21 @@ public final class CompositionPlayer extends SimpleBasePlayer {
       audioSinkSupplier = () -> new DefaultAudioSink.Builder(context).build();
       glObjectsProviderSupplier = DefaultGlObjectsProvider::new;
       audioMixerFactorySupplier = DefaultAudioMixer.Factory::new;
-      mediaSourceFactorySupplier = () -> new DefaultMediaSourceFactory(context);
+      mediaSourceFactorySupplier =
+          () -> {
+            DefaultExtractorsFactory extractorsFactory =
+                new DefaultExtractorsFactory()
+                    .setAdtsExtractorFlags(AdtsExtractor.FLAG_ENABLE_CONSTANT_BITRATE_SEEKING)
+                    .setAmrExtractorFlags(AmrExtractor.FLAG_ENABLE_CONSTANT_BITRATE_SEEKING);
+            return new DefaultMediaSourceFactory(context, extractorsFactory)
+                .setEnableClippingInMediaPeriod(true);
+          };
       loadControlSupplier = DefaultLoadControl::new;
       imageDecoderFactorySupplier =
           () ->
               new BitmapFactoryImageDecoder.Factory(context)
                   .setMaxOutputSize(GlUtil.MAX_BITMAP_DECODING_SIZE);
+      imageReaderAdapterFactorySupplier = DefaultImageReaderAdapter.Factory::new;
       videoPrewarmingEnabled = true;
       lateThresholdToDropInputUs = LATE_US_TO_DROP_INPUT_FRAME;
       clock = Clock.DEFAULT;
@@ -295,6 +324,22 @@ public final class CompositionPlayer extends SimpleBasePlayer {
     /* package */ Builder setVideoPrewarmingEnabled(boolean videoPrewarmingEnabled) {
       // TODO: b/369817794 - Remove this setter once the tests are run on a device with API < 23.
       this.videoPrewarmingEnabled = videoPrewarmingEnabled;
+      return this;
+    }
+
+    /**
+     * Sets whether to enable per-stream media progression in the player.
+     *
+     * <p>The default value is {@code false}.
+     *
+     * @param perStreamMediaProgressionEnabled Whether to enable per-stream media progression in the
+     *     player.
+     * @return This builder, for convenience.
+     */
+    @CanIgnoreReturnValue
+    @ExperimentalApi // TODO: b/528260159 - Enable this by default.
+    public Builder setPerStreamMediaProgressionEnabled(boolean perStreamMediaProgressionEnabled) {
+      this.perStreamMediaProgressionEnabled = perStreamMediaProgressionEnabled;
       return this;
     }
 
@@ -442,46 +487,83 @@ public final class CompositionPlayer extends SimpleBasePlayer {
     }
 
     /**
-     * Sets the {@link PacketConsumer.Factory} that will create the {@link PacketConsumer} to apply
-     * effects and render the frames.
-     *
-     * <p>If set, {@link #videoGraphFactory} is ignored.
-     *
-     * <p>The created {@link PacketConsumer} will be released on {@link
-     * CompositionPlayer#release()}.
-     *
-     * <p>The default value is {@code null}.
-     *
-     * <p>This method is experimental and will be renamed or removed in a future release.
-     *
-     * @param packetConsumerFactory The {@link PacketConsumer.Factory}.
-     * @throws IllegalStateException if a {@link VideoGraph.Factory} is {@linkplain
-     *     #setVideoGraphFactory set}.
+     * @deprecated Use {@link #setFrameProcessorFactory} instead.
      */
-    @ExperimentalApi // TODO: b/449956776 - Remove once FrameConsumer API is finalized.
+    @Deprecated
+    @RequiresApi(28)
     @CanIgnoreReturnValue
-    public Builder setPacketConsumerFactory(
-        PacketConsumer.Factory<ImmutableList<HardwareBufferFrame>> packetConsumerFactory) {
+    @RestrictTo(Scope.LIBRARY_GROUP) // TODO: b/498547782 - Remove once usages have been migrated.
+    public Builder setHardwareBufferEffectsPipeline(
+        RenderingPacketConsumer<ImmutableList<HardwareBufferFrame>, HardwareBufferFrameQueue>
+            packetProcessor) {
       checkState(videoGraphFactory == null);
-      this.packetConsumerFactory = packetConsumerFactory;
+      checkState(frameProcessorFactory == null);
+      this.packetProcessor = packetProcessor;
       return this;
     }
 
     /**
-     * Sets optional processing on all {@link HardwareBufferFrame}s before entering the {@linkplain
-     * #setPacketConsumerFactory effects pipeline}.
+     * Sets the {@link FrameProcessor.Factory} to be used to create {@link FrameProcessor} instances
+     * that are used to process {@link androidx.media3.common.video.HardwareBufferFrame}s.
      *
-     * <p>This should only be used to improve backwards compatibility with older API versions, and
-     * is not intended for application use.
+     * <p>If a {@link FrameProcessor.Factory} is not set, a {@link SingleInputVideoGraph.Factory} is
+     * used and {@link CompositionPlayer} will not process {@link
+     * androidx.media3.common.video.HardwareBufferFrame}s.
      *
-     * <p>Only used if {@link #setPacketConsumerFactory} is set.
+     * <p>If used on API 32 and below, the {@linkplain #setNativeHardwareBufferHelpers native
+     * helpers} must be set.
      *
-     * <p>The default value is {@code null}.
+     * @param frameProcessorFactory The {@link FrameProcessor.Factory}.
+     * @return This builder.
+     * @throws IllegalStateException if a {@linkplain #setVideoGraphFactory videoGraphFactory} or
+     *     {@linkplain #setHardwareBufferEffectsPipeline HardwareBufferEffectsPipeline} is set.
      */
-    @RestrictTo(Scope.LIBRARY_GROUP)
+    @RequiresApi(28)
     @CanIgnoreReturnValue
-    public Builder setHardwareBufferPostProcessor(HardwareBufferFrameProcessor processor) {
-      this.hardwareBufferPostProcessor = processor;
+    @ExperimentalApi // TODO: b/449956776 - Remove once FrameConsumer API is finalized.
+    public Builder setFrameProcessorFactory(FrameProcessor.Factory frameProcessorFactory) {
+      checkNotNull(frameProcessorFactory);
+      checkState(videoGraphFactory == null);
+      checkState(packetProcessor == null);
+      this.frameProcessorFactory = frameProcessorFactory;
+      return this;
+    }
+
+    /**
+     * Sets the {@link HardwareBufferJniWrapper} used to provide native helpers.
+     *
+     * <p>This method is experimental and will be renamed or removed in a future release.
+     *
+     * <p>This will only be used if {@link #setHardwareBufferEffectsPipeline} is set.
+     *
+     * @param hardwareBufferJniWrapper The {@link HardwareBufferJniWrapper} to provide native
+     *     helpers.
+     * @return This builder.
+     */
+    @CanIgnoreReturnValue
+    @ExperimentalApi // TODO: b/449956776 - Remove once FrameConsumer API is finalized.
+    public Builder setNativeHardwareBufferHelpers(
+        HardwareBufferJniWrapper hardwareBufferJniWrapper) {
+      this.hardwareBufferJniWrapper = hardwareBufferJniWrapper;
+      return this;
+    }
+
+    /**
+     * Sets the {@link ImageReaderAdapter.Factory} used to create the video {@link
+     * ImageReaderAdapter}.
+     *
+     * <p>The default value is a {@link DefaultImageReaderAdapter.Factory}.
+     *
+     * @param imageReaderAdapterFactory The {@link ImageReaderAdapter.Factory} to create instances
+     *     of {@link ImageReaderAdapter}, which are used to receive video frames from a {@link
+     *     Surface}.
+     * @return This builder.
+     */
+    @CanIgnoreReturnValue
+    @VisibleForTesting
+    /* package */ Builder setImageReaderAdapterFactory(
+        ImageReaderAdapter.Factory imageReaderAdapterFactory) {
+      this.imageReaderAdapterFactorySupplier = () -> imageReaderAdapterFactory;
       return this;
     }
 
@@ -553,29 +635,37 @@ public final class CompositionPlayer extends SimpleBasePlayer {
   private final ImageDecoder.Factory imageDecoderFactory;
   private final VideoGraph.Factory videoGraphFactory;
   private final boolean videoPrewarmingEnabled;
+  private final boolean perStreamMediaProgressionEnabled;
   private final HandlerWrapper compositionInternalListenerHandler;
   private final LoadControl loadControl;
   private final boolean enableReplayableCache;
   private final long lateThresholdToDropInputUs;
   private final AudioFocusManager audioFocusManager;
   private final InternalListener internalListener;
-  private final boolean shouldShutdownExecutorService;
-  @Nullable private final ExecutorService executorService;
   @Nullable private final CompositionVideoPacketReleaseControl videoPacketReleaseControl;
-  @Nullable private final PacketConsumer<ImmutableList<HardwareBufferFrame>> packetConsumer;
-  // Applications can choose to render frames to screen themselves, or use media3 components.
-  // CompositionPlayer only receives events when frames are rendered on screen when media3
-  // components are used.
-  private final boolean packetConsumerReportsRenderingEvents;
+
+  /**
+   * The frame processor used to process video frames.
+   *
+   * <p>All interactions with this processor (including creation, queueing, and releasing) and its
+   * listener callbacks must be executed on the {@link #playbackThread}.
+   */
+  @Nullable private final FrameProcessor frameProcessor;
+
+  private final ImageReaderAdapter.Factory imageReaderAdapterFactory;
+
+  @Nullable private final SurfaceHolderFrameWriter surfaceHolderFrameWriter;
+
   @Nullable private final HardwareBufferFrameProcessor hardwareBufferPostProcessor;
+
+  private final HandlerThread playbackThread;
+  private final HandlerWrapper playbackThreadHandler;
 
   /** Maps from input index to whether the video track is selected in that sequence. */
   private final SparseBooleanArray videoTracksSelected;
 
   private final AnalyticsCollector analyticsCollector;
 
-  private @MonotonicNonNull HandlerThread playbackThread;
-  private @MonotonicNonNull HandlerWrapper playbackThreadHandler;
   private @MonotonicNonNull CompositionPlayerInternal compositionPlayerInternal;
   private @MonotonicNonNull ImmutableList<MediaItemData> playlist;
   private @MonotonicNonNull Composition composition;
@@ -610,6 +700,8 @@ public final class CompositionPlayer extends SimpleBasePlayer {
   private boolean playWhenReadyBeforeScrubbingEnabled;
   private AudioAttributes audioAttributes;
   private boolean handleAudioFocus;
+  private boolean waitingForFrameAfterSeek;
+  private long pendingSeekPositionMs;
 
   // "this" reference for position suppliers.
   @SuppressWarnings("initialization:methodref.receiver.bound.invalid")
@@ -624,10 +716,12 @@ public final class CompositionPlayer extends SimpleBasePlayer {
     imageDecoderFactory = new GapHandlingDecoderFactory(builder.imageDecoderFactorySupplier.get());
     videoGraphFactory = checkNotNull(builder.videoGraphFactory);
     videoPrewarmingEnabled = builder.videoPrewarmingEnabled;
+    perStreamMediaProgressionEnabled = builder.perStreamMediaProgressionEnabled;
     compositionInternalListenerHandler = clock.createHandler(builder.looper, /* callback= */ null);
     loadControl = builder.loadControlSupplier.get();
     this.enableReplayableCache = builder.enableReplayableCache;
     lateThresholdToDropInputUs = builder.lateThresholdToDropInputUs;
+    imageReaderAdapterFactory = builder.imageReaderAdapterFactorySupplier.get();
     videoTracksSelected = new SparseBooleanArray();
     playerHolders = new ArrayList<>();
     compositionDurationUs = C.TIME_UNSET;
@@ -638,59 +732,88 @@ public final class CompositionPlayer extends SimpleBasePlayer {
     totalBufferedDurationSupplier = new LivePositionSupplier(this::getTotalBufferedDurationMs);
     audioAttributes = builder.audioAttributes;
     handleAudioFocus = builder.handleAudioFocus;
+    pendingSeekPositionMs = C.TIME_UNSET;
     appNeedsToPrepareCompositionPlayer = true;
     internalListener = new InternalListener();
     audioFocusManager =
         new AudioFocusManager(
             context, applicationHandler.getLooper(), /* playerControl= */ internalListener);
     playbackAudioGraphWrapper = new PlaybackAudioGraphWrapper(audioMixerFactory, finalAudioSink);
-    if (builder.packetConsumerFactory != null) {
-      hardwareBufferPostProcessor = builder.hardwareBufferPostProcessor;
-      executorService =
-          builder.glExecutorService != null
-              ? builder.glExecutorService
-              : Util.newSingleThreadExecutor("CompositionPlayer:GlThread");
-      shouldShutdownExecutorService = builder.glExecutorService == null;
-      // TODO: b/483976838 - Switch to PacketProcessor and create the
-      // SurfaceHolderHardwareBufferFrameQueue inside CompositionPlayer.
-      if (SDK_INT >= 34
-          && builder.packetConsumerFactory instanceof ProcessAndRenderToSurfaceConsumer.Factory) {
-        ((ProcessAndRenderToSurfaceConsumer.Factory) builder.packetConsumerFactory)
-            .setListener(internalListener, directExecutor());
-        packetConsumerReportsRenderingEvents = true;
+    HardwareBufferJniWrapper hardwareBufferJniWrapper = builder.hardwareBufferJniWrapper;
+    @Nullable
+    FrameProcessor.Factory frameProcessorFactory =
+        builder.frameProcessorFactory != null
+            ? builder.frameProcessorFactory
+            : getRenderingPacketConsumerFactory(builder.packetProcessor);
+    playbackThread =
+        new HandlerThread(/* name= */ "CompositionPlaybackThread", Process.THREAD_PRIORITY_AUDIO);
+    try {
+      playbackThread.start();
+      playbackThreadHandler = clock.createHandler(playbackThread.getLooper(), /* callback= */ null);
+      if (SDK_INT >= 28 && frameProcessorFactory != null) {
+        Executor playbackThreadExecutor =
+            new HandlerExecutor(playbackThreadHandler, internalListener);
+        Executor applicationThreadExecutor =
+            new HandlerExecutor(applicationHandler, internalListener);
+        // Convert CPU Bitmaps to HardwareBuffers when the native helpers are available.
+        if (hardwareBufferJniWrapper != null) {
+          hardwareBufferPostProcessor =
+              new BitmapToHardwareBufferProcessor(
+                  hardwareBufferJniWrapper,
+                  /* internalExecutor= */ Util.newSingleThreadExecutor(
+                      "BitmapToHardwareBufferProcessor::Thread"),
+                  /* errorExecutor= */ playbackThreadExecutor,
+                  /* errorCallback= */ internalListener::onError);
+        } else {
+          hardwareBufferPostProcessor = null;
+        }
+        surfaceHolderFrameWriter =
+            SDK_INT >= 33
+                ? SurfaceHolderFrameWriter.create(
+                    /* surfaceHolder= */ null,
+                    /* surfaceHolderExecutor= */ applicationThreadExecutor,
+                    internalListener,
+                    applicationThreadExecutor)
+                : SurfaceHolderFrameWriter.create(
+                    /* surfaceHolder= */ null,
+                    /* surfaceHolderExecutor= */ applicationThreadExecutor,
+                    internalListener,
+                    applicationThreadExecutor,
+                    checkNotNull(hardwareBufferJniWrapper));
+        frameProcessor =
+            frameProcessorFactory.create(
+                surfaceHolderFrameWriter,
+                /* listenerExecutor= */ playbackThreadExecutor,
+                /* listener= */ internalListener);
+
+        VideoFrameReleaseControl videoFrameReleaseControl =
+            new VideoFrameReleaseControl(
+                this.context,
+                /* frameTimingEvaluator= */ new CompositionFrameTimingEvaluator(
+                    // Convert lateThresholdToDropInputUs to early time.
+                    lateThresholdToDropInputUs != C.TIME_UNSET
+                        ? -lateThresholdToDropInputUs
+                        : C.TIME_UNSET),
+                /* allowedJoiningTimeMs= */ 0);
+        videoFrameReleaseControl.setClock(clock);
+        videoPacketReleaseControl =
+            new CompositionVideoPacketReleaseControl(
+                videoFrameReleaseControl, frameProcessor, internalListener);
       } else {
-        packetConsumerReportsRenderingEvents = false;
+        hardwareBufferPostProcessor = null;
+        frameProcessor = null;
+        surfaceHolderFrameWriter = null;
+        frameAggregator = null;
+        videoPacketReleaseControl = null;
       }
-      packetConsumer = builder.packetConsumerFactory.create();
-      VideoFrameReleaseControl videoFrameReleaseControl =
-          new VideoFrameReleaseControl(
-              this.context,
-              /* frameTimingEvaluator= */ new CompositionFrameTimingEvaluator(
-                  // Convert lateThresholdToDropInputUs to early time.
-                  lateThresholdToDropInputUs != C.TIME_UNSET
-                      ? -lateThresholdToDropInputUs
-                      : C.TIME_UNSET),
-              /* allowedJoiningTimeMs= */ 0);
-      videoFrameReleaseControl.setClock(clock);
-      videoPacketReleaseControl =
-          new CompositionVideoPacketReleaseControl(
-              videoFrameReleaseControl,
-              packetConsumer,
-              executorService,
-              e -> internalListener.onError(VideoFrameProcessingException.from(e)));
-    } else {
-      hardwareBufferPostProcessor = null;
-      executorService = builder.glExecutorService;
-      shouldShutdownExecutorService = false;
-      packetConsumer = null;
-      packetConsumerReportsRenderingEvents = false;
-      frameAggregator = null;
-      videoPacketReleaseControl = null;
+      analyticsCollector = new DefaultAnalyticsCollector(clock);
+      analyticsCollector.setPlayer(this, builder.looper);
+      analyticsCollector.addListener(new EventLogger(TAG));
+      addListener(analyticsCollector);
+    } catch (Throwable t) {
+      playbackThread.quit();
+      throw t;
     }
-    analyticsCollector = new DefaultAnalyticsCollector(clock);
-    analyticsCollector.setPlayer(this, builder.looper);
-    analyticsCollector.addListener(new EventLogger(TAG));
-    addListener(analyticsCollector);
   }
 
   /**
@@ -727,7 +850,8 @@ public final class CompositionPlayer extends SimpleBasePlayer {
         COMPONENT_COMPOSITION_PLAYER,
         EVENT_SET_COMPOSITION,
         /* presentationTimeUs= */ C.TIME_UNSET,
-        composition.toJsonObject());
+        /* extraFormat= */ "%s",
+        composition.toJsonObject().toString());
 
     composition = applyPreProcessingEffects(composition);
 
@@ -802,6 +926,14 @@ public final class CompositionPlayer extends SimpleBasePlayer {
           this.playWhenReadyBeforeScrubbingEnabled
               ? PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST
               : this.playWhenReadyChangeReason);
+
+      // Bypass debouncing for the final seek when scrubbing ends.
+      waitingForFrameAfterSeek = false;
+      if (pendingSeekPositionMs != C.TIME_UNSET) {
+        long pendingSeekPosition = pendingSeekPositionMs;
+        pendingSeekPositionMs = C.TIME_UNSET;
+        handleSeekInternal(pendingSeekPosition);
+      }
     }
 
     // This is not a SimpleBasePlayer method, so we need to manually invalidate the state.
@@ -821,16 +953,21 @@ public final class CompositionPlayer extends SimpleBasePlayer {
    * Forces the effect pipeline to redraw the effects immediately.
    *
    * <p>The player must be {@linkplain Builder#experimentalSetEnableReplayableCache built with
-   * replayable cache support}.
+   * replayable cache support}, unless using {@link Builder#setFrameProcessorFactory FrameProcessor}
+   * to apply effects.
    */
   @ExperimentalApi // TODO: b/470383420 - Remove or convert to non-experimental method.
   public void experimentalRedrawLastFrame() {
-    checkState(enableReplayableCache);
     if (playbackThreadHandler == null || playbackVideoGraphWrapper == null) {
       // Ignore replays before setting a composition.
       return;
     }
-    playbackThreadHandler.post(() -> checkNotNull(playbackVideoGraphWrapper).getSink(0).redraw());
+    if (videoPacketReleaseControl != null) {
+      checkNotNull(compositionPlayerInternal).redraw();
+    } else if (playbackVideoGraphWrapper != null) {
+      checkState(enableReplayableCache);
+      playbackThreadHandler.post(() -> checkNotNull(playbackVideoGraphWrapper).getSink(0).redraw());
+    }
   }
 
   /** Sets the {@link Surface} and {@link Size} to render to. */
@@ -841,14 +978,12 @@ public final class CompositionPlayer extends SimpleBasePlayer {
   }
 
   /**
-   * Returns the {@link Looper} associated with the playback thread or null if the internal player
-   * has not been prepared.
+   * Returns the {@link Looper} associated with the playback thread.
    *
    * <p>This method may be called from any thread.
    */
-  @Nullable
   public Looper getPlaybackLooper() {
-    return playbackThread != null ? playbackThread.getLooper() : null;
+    return playbackThread.getLooper();
   }
 
   /**
@@ -878,7 +1013,7 @@ public final class CompositionPlayer extends SimpleBasePlayer {
             .setTotalBufferedDurationMs(totalBufferedDurationSupplier)
             .setNewlyRenderedFirstFrame(getRenderedFirstFrameAndReset())
             .setPlaybackSuppressionReason(playbackSuppressionReason);
-    if (packetConsumer != null && videoSize != null) {
+    if (frameProcessor != null && videoSize != null) {
       state.setVideoSize(videoSize);
     }
     if (repeatingCompositionSeekInProgress) {
@@ -935,6 +1070,8 @@ public final class CompositionPlayer extends SimpleBasePlayer {
       playerHolders.get(i).player.stop();
     }
     appNeedsToPrepareCompositionPlayer = true;
+    waitingForFrameAfterSeek = false;
+    pendingSeekPositionMs = C.TIME_UNSET;
     updatePlaybackState();
     return Futures.immediateVoidFuture();
   }
@@ -955,14 +1092,9 @@ public final class CompositionPlayer extends SimpleBasePlayer {
     }
     playerHolders.clear();
     boolean internalPlayerSuccessfullyReleased = checkNotNull(compositionPlayerInternal).release();
+    waitingForFrameAfterSeek = false;
+    pendingSeekPositionMs = C.TIME_UNSET;
     removeSurfaceCallbacks();
-    // TODO: b/449956936 - Sequence releasing PacketConsumer with other internal objects.
-    ListenableFuture<Void> releaseFuture;
-    if (packetConsumer != null) {
-      releaseFuture = PacketConsumerUtil.release(packetConsumer, checkNotNull(executorService));
-    } else {
-      releaseFuture = immediateVoidFuture();
-    }
     if (hardwareBufferPostProcessor != null) {
       try {
         hardwareBufferPostProcessor.close();
@@ -970,6 +1102,17 @@ public final class CompositionPlayer extends SimpleBasePlayer {
         // Ignore exceptions during release.
         Log.e(TAG, "Failed to release hardwareBufferPostProcessor.", e);
       }
+    }
+    // TODO: b/518679527 - Move close calls of frameAggregator and frameProcessor to the
+    // playback thread.
+    if (frameAggregator != null) {
+      frameAggregator.close();
+    }
+    if (frameProcessor != null) {
+      frameProcessor.close();
+    }
+    if (SDK_INT >= 28 && surfaceHolderFrameWriter != null) {
+      surfaceHolderFrameWriter.close();
     }
     // Remove any queued callback from the internal player.
     compositionInternalListenerHandler.removeCallbacksAndMessages(/* token= */ null);
@@ -986,11 +1129,8 @@ public final class CompositionPlayer extends SimpleBasePlayer {
               PlaybackException.ERROR_CODE_TIMEOUT);
       updatePlaybackState();
     }
-    if (shouldShutdownExecutorService && executorService != null) {
-      executorService.shutdown();
-    }
     analyticsCollector.release();
-    return releaseFuture;
+    return immediateVoidFuture();
   }
 
   @Override
@@ -1035,6 +1175,11 @@ public final class CompositionPlayer extends SimpleBasePlayer {
   @Override
   protected ListenableFuture<?> handleSeek(
       int mediaItemIndex, long positionMs, @Command int seekCommand) {
+    handleSeekInternal(positionMs);
+    return Futures.immediateVoidFuture();
+  }
+
+  private void handleSeekInternal(long positionMs) {
     resetLivePositionSuppliers();
     DebugTraceUtil.logEvent(
         COMPONENT_COMPOSITION_PLAYER,
@@ -1042,11 +1187,22 @@ public final class CompositionPlayer extends SimpleBasePlayer {
         /* presentationTimeUs= */ C.TIME_UNSET,
         "positionMs=%d",
         positionMs);
+
+    if (frameProcessor != null) {
+      if (waitingForFrameAfterSeek) {
+        pendingSeekPositionMs = positionMs;
+        return;
+      }
+      waitingForFrameAfterSeek = true;
+    }
     CompositionPlayerInternal compositionPlayerInternal =
         checkNotNull(this.compositionPlayerInternal);
     compositionPlayerInternal.startSeek(positionMs);
     for (int i = 0; i < playerHolders.size(); i++) {
-      if (packetConsumer != null) {
+      playerHolders.get(i).player.seekTo(positionMs);
+      // Flush the HardwareBufferFrameReader and FrameAggregator after the player seeks to ensure
+      // frames from before the seek do not race with the flush calls.
+      if (frameProcessor != null) {
         // TODO: b/449956936 - move packetConsumer playback thread seek handling to
         //  CompositionPlayerInternal.
         int sequenceIndex = i;
@@ -1060,13 +1216,11 @@ public final class CompositionPlayer extends SimpleBasePlayer {
                   frameReader.flush();
                   checkNotNull(frameAggregator).flush(sequenceIndex);
                 })
-            .setPayload(playerHolders.get(i).hardwareBufferFrameReader)
+            .setPayload(playerHolders.get(i).hardwareBufferFrameReaderSupplier.get())
             .send();
       }
-      playerHolders.get(i).player.seekTo(positionMs);
     }
     compositionPlayerInternal.endSeek();
-    return Futures.immediateVoidFuture();
   }
 
   @Override
@@ -1082,7 +1236,7 @@ public final class CompositionPlayer extends SimpleBasePlayer {
     if (playerHolders.isEmpty()) {
       return;
     }
-    if (packetConsumer == null) {
+    if (frameProcessor == null) {
       playerHolders.get(0).player.setVideoFrameMetadataListener(videoFrameMetadataListener);
     }
   }
@@ -1167,7 +1321,9 @@ public final class CompositionPlayer extends SimpleBasePlayer {
     // SpeedChangingAudioProcessor does not need to adjust them.
     preProcessors.add(
         new SpeedChangingAudioProcessor(
-            item.speedProvider, /* areInputTimestampsAdjusted= */ true));
+            item.speedProvider,
+            /* areInputTimestampsAdjusted= */ true,
+            item.speedParameters.shouldMaintainPitch));
     return item.buildUpon().setPreProcessingAudioProcessors(preProcessors).build();
   }
 
@@ -1191,6 +1347,15 @@ public final class CompositionPlayer extends SimpleBasePlayer {
     return item.buildUpon()
         .setEffects(new Effects(item.effects.audioProcessors, newVideoEffects))
         .build();
+  }
+
+  private static boolean containsVideo(Composition composition) {
+    for (EditedMediaItemSequence sequence : composition.sequences) {
+      if (sequence.trackTypes.contains(C.TRACK_TYPE_VIDEO)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private void updatePlaybackState() {
@@ -1236,7 +1401,9 @@ public final class CompositionPlayer extends SimpleBasePlayer {
             /* playWhenReady= */ false, /* shouldUpdateInternalPlayers= */ true);
       }
     } else if (endedCount == playerHolders.size()
-        && (!packetConsumerReportsRenderingEvents || packetConsumerEnded)) {
+        && (frameProcessor == null
+            || packetConsumerEnded
+            || !containsVideo(checkNotNull(composition)))) {
       playbackState = STATE_ENDED;
       checkNotNull(compositionPlayerInternal).stopRendering();
     } else {
@@ -1359,10 +1526,6 @@ public final class CompositionPlayer extends SimpleBasePlayer {
       return;
     }
 
-    playbackThread = new HandlerThread("CompositionPlaybackThread", Process.THREAD_PRIORITY_AUDIO);
-    playbackThread.start();
-    playbackThreadHandler = clock.createHandler(playbackThread.getLooper(), /* callback= */ null);
-
     setAudioAttributesInternal(audioAttributes, handleAudioFocus);
 
     // Once this method returns, further access to the audio and video graph wrappers must done on
@@ -1398,19 +1561,26 @@ public final class CompositionPlayer extends SimpleBasePlayer {
   }
 
   private void setCompositionInternal(Composition composition, long startPositionMs) {
+    waitingForFrameAfterSeek = false;
+    pendingSeekPositionMs = C.TIME_UNSET;
     for (int i = 0; i < playerHolders.size(); i++) {
       // TODO: b/412585856 - Optimize for the case where we can keep some resources.
       playerHolders.get(i).release();
     }
     playerHolders.clear();
 
-    if (packetConsumer != null) {
+    if (SDK_INT >= 26 && frameProcessor != null) {
       if (frameAggregator != null) {
-        frameAggregator.releaseAllFrames();
+        frameAggregator.close();
       }
+      // Flush the primary sequence to reset the state of the release control when a new Composition
+      // is set.
+      checkNotNull(videoPacketReleaseControl).flush(/* sequenceIndex= */ 0);
       frameAggregator =
           new FrameAggregator(
-              composition.sequences.size(), checkNotNull(videoPacketReleaseControl)::queue);
+              composition.sequences.size(),
+              videoPacketReleaseControl::queue,
+              videoPacketReleaseControl::flush);
     }
 
     prepareCompositionPlayerInternal();
@@ -1460,7 +1630,7 @@ public final class CompositionPlayer extends SimpleBasePlayer {
       player.setMediaSource(
           createPrimarySequenceMediaSource(sequence, mediaSourceFactory, shouldGenerateBlankFrames),
           startPositionMs);
-      if (videoFrameMetadataListener != null && packetConsumer == null) {
+      if (videoFrameMetadataListener != null && frameProcessor == null) {
         player.setVideoFrameMetadataListener(videoFrameMetadataListener);
       }
     } else {
@@ -1483,36 +1653,45 @@ public final class CompositionPlayer extends SimpleBasePlayer {
   private SequencePlayerHolder createSequencePlayer(Composition composition, int sequenceIndex) {
     boolean requestMediaCodecToneMapping =
         composition.hdrMode == Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_MEDIACODEC;
+    boolean sequenceContainsVideo =
+        composition.sequences.get(sequenceIndex).trackTypes.contains(C.TRACK_TYPE_VIDEO);
     SequenceRenderersFactory renderersFactory;
-    HardwareBufferFrameReader hardwareBufferFrameReader = null;
-    if (packetConsumer != null) {
+    Supplier<@NullableType HardwareBufferFrameReader> hardwareBufferFrameReaderSupplier =
+        () -> null;
+    if (frameProcessor != null) {
       // TODO: b/449956936 - Support MediaCodec tone mapping with packet consumer.
       checkState(!requestMediaCodecToneMapping);
       // TODO: b/449957106 - support component reuse, and decouple the Composition from the
       // HardwareBufferFrameReader.
-      hardwareBufferFrameReader =
-          new HardwareBufferFrameReader(
-              composition,
-              sequenceIndex,
-              /* frameConsumer= */ hardwareBufferFrame -> {
-                if (hardwareBufferFrame == HardwareBufferFrame.END_OF_STREAM_FRAME) {
-                  checkNotNull(frameAggregator).queueEndOfStream(sequenceIndex);
-                } else if (hardwareBufferPostProcessor != null) {
-                  HardwareBufferFrame processedFrame =
-                      hardwareBufferPostProcessor.process(hardwareBufferFrame);
-                  checkNotNull(frameAggregator).queueFrame(processedFrame, sequenceIndex);
-                } else {
-                  checkNotNull(frameAggregator).queueFrame(hardwareBufferFrame, sequenceIndex);
-                }
-              },
-              checkNotNull(playbackThread).getLooper(),
-              /* defaultSurfacePixelFormat= */ ImageFormat.PRIVATE,
-              e ->
-                  maybeUpdatePlaybackError(
-                      "HardwareBufferFrameReader error",
-                      e,
-                      PlaybackException.ERROR_CODE_UNSPECIFIED),
-              compositionInternalListenerHandler);
+      final FrameAggregator currentFrameAggregator = frameAggregator;
+      hardwareBufferFrameReaderSupplier =
+          Suppliers.memoize(
+              () ->
+                  new HardwareBufferFrameReader(
+                      composition,
+                      sequenceIndex,
+                      /* frameConsumer= */ hardwareBufferFrame -> {
+                        if (hardwareBufferFrame == HardwareBufferFrame.END_OF_STREAM_FRAME) {
+                          checkNotNull(currentFrameAggregator).queueEndOfStream(sequenceIndex);
+                        } else if (hardwareBufferPostProcessor != null) {
+                          HardwareBufferFrame processedFrame =
+                              hardwareBufferPostProcessor.process(hardwareBufferFrame);
+                          checkNotNull(currentFrameAggregator)
+                              .queueFrame(processedFrame, sequenceIndex);
+                        } else {
+                          checkNotNull(currentFrameAggregator)
+                              .queueFrame(hardwareBufferFrame, sequenceIndex);
+                        }
+                      },
+                      checkNotNull(playbackThread).getLooper(),
+                      /* defaultSurfacePixelFormat= */ ImageFormat.PRIVATE,
+                      imageReaderAdapterFactory,
+                      e ->
+                          maybeUpdatePlaybackError(
+                              "HardwareBufferFrameReader error",
+                              e,
+                              PlaybackException.ERROR_CODE_UNSPECIFIED),
+                      compositionInternalListenerHandler));
       renderersFactory =
           SequenceRenderersFactory.createForHardwareBuffer(
               context,
@@ -1521,9 +1700,10 @@ public final class CompositionPlayer extends SimpleBasePlayer {
               /* inputIndex= */ sequenceIndex,
               videoPrewarmingEnabled,
               checkNotNull(videoPacketReleaseControl),
-              hardwareBufferFrameReader,
+              hardwareBufferFrameReaderSupplier,
               lateThresholdToDropInputUs);
-
+      // Ensure the FrameAggregator ignores audio only sequences.
+      checkNotNull(currentFrameAggregator).registerSequence(sequenceIndex, sequenceContainsVideo);
     } else {
       VideoSink inputSink = checkNotNull(playbackVideoGraphWrapper).getSink(sequenceIndex);
       renderersFactory =
@@ -1544,7 +1724,8 @@ public final class CompositionPlayer extends SimpleBasePlayer {
             clock,
             renderersFactory,
             /* inputIndex= */ sequenceIndex,
-            hardwareBufferFrameReader);
+            hardwareBufferFrameReaderSupplier,
+            /* shouldReleaseHardwareBufferFrameReader= */ sequenceContainsVideo);
     playerHolder.player.addListener(new PlayerListener(sequenceIndex));
     playerHolder.player.addAnalyticsListener(new PlayerAnalyticsListener());
     playerHolder.player.addAnalyticsListener(new EventLogger(TAG + "-" + sequenceIndex));
@@ -1552,8 +1733,9 @@ public final class CompositionPlayer extends SimpleBasePlayer {
     playerHolder.player.setAudioAttributes(audioAttributes, /* handleAudioFocus= */ false);
     playerHolder.player.setPauseAtEndOfMediaItems(true);
     playerHolder.renderersFactory.setRequestMediaCodecToneMapping(requestMediaCodecToneMapping);
-    if (packetConsumer != null) {
-      playerHolder.player.setVideoSurface(checkNotNull(hardwareBufferFrameReader).getSurface());
+    if (frameProcessor != null && sequenceContainsVideo) {
+      playerHolder.player.setVideoSurface(
+          checkNotNull(hardwareBufferFrameReaderSupplier.get()).getSurface());
     }
     return playerHolder;
   }
@@ -1852,6 +2034,8 @@ public final class CompositionPlayer extends SimpleBasePlayer {
 
   private void maybeUpdatePlaybackError(
       String errorMessage, Exception cause, @PlaybackException.ErrorCode int errorCode) {
+    waitingForFrameAfterSeek = false;
+    pendingSeekPositionMs = C.TIME_UNSET;
     if (playbackException == null) {
       playbackException = new PlaybackException(errorMessage, cause, errorCode);
       for (int i = 0; i < playerHolders.size(); i++) {
@@ -1867,6 +2051,10 @@ public final class CompositionPlayer extends SimpleBasePlayer {
   }
 
   private void setVideoSurfaceHolderInternal(SurfaceHolder surfaceHolder) {
+    if (SDK_INT >= 28 && surfaceHolderFrameWriter != null) {
+      surfaceHolderFrameWriter.setSurfaceHolder(surfaceHolder);
+      return;
+    }
     removeSurfaceCallbacks();
     this.surfaceHolder = surfaceHolder;
     surfaceHolder.addCallback(internalListener);
@@ -1900,6 +2088,9 @@ public final class CompositionPlayer extends SimpleBasePlayer {
    */
   private void clearVideoSurfaceInternal() {
     displaySurface = null;
+    if (SDK_INT >= 28 && surfaceHolderFrameWriter != null) {
+      surfaceHolderFrameWriter.setSurfaceHolder(null);
+    }
     if (compositionPlayerInternal != null) {
       ConditionVariable surfaceCleared = new ConditionVariable();
       compositionPlayerInternal.clearOutputSurface(surfaceCleared);
@@ -2057,7 +2248,7 @@ public final class CompositionPlayer extends SimpleBasePlayer {
    * #wrapMediaSourceWithCompositionForwardingTimeline media source} when changing the {@linkplain
    * SequencePlayerHolder sequence players} content.
    */
-  private static final class CompositionForwardingTimeline extends ForwardingTimeline {
+  /* package */ static final class CompositionForwardingTimeline extends ForwardingTimeline {
 
     private final EditedMediaItemSequence sequence;
 
@@ -2107,7 +2298,7 @@ public final class CompositionPlayer extends SimpleBasePlayer {
     @Override
     public void onPlaybackStateChanged(int playbackState) {
       if (playbackState == STATE_ENDED) {
-        if (packetConsumer != null) {
+        if (frameProcessor != null) {
           checkNotNull(frameAggregator).queueEndOfStream(playerIndex);
         }
       }
@@ -2162,7 +2353,8 @@ public final class CompositionPlayer extends SimpleBasePlayer {
     public final ExoPlayer player;
     public final SequenceRenderersFactory renderersFactory;
     public final CompositionTrackSelector trackSelector;
-    @Nullable final HardwareBufferFrameReader hardwareBufferFrameReader;
+    final Supplier<@NullableType HardwareBufferFrameReader> hardwareBufferFrameReaderSupplier;
+    final boolean shouldReleaseHardwareBufferFrameReader;
 
     private SequencePlayerHolder(
         Context context,
@@ -2171,7 +2363,8 @@ public final class CompositionPlayer extends SimpleBasePlayer {
         Clock clock,
         SequenceRenderersFactory renderersFactory,
         int inputIndex,
-        @Nullable HardwareBufferFrameReader hardwareBufferFrameReader) {
+        Supplier<@NullableType HardwareBufferFrameReader> hardwareBufferFrameReaderSupplier,
+        boolean shouldReleaseHardwareBufferFrameReader) {
       trackSelector =
           new CompositionTrackSelector(
               context,
@@ -2189,25 +2382,35 @@ public final class CompositionPlayer extends SimpleBasePlayer {
               .setClock(clock)
               // Use dynamic scheduling to show the first video/image frame more promptly when the
               // player is paused (which is common in editing applications).
-              .experimentalSetDynamicSchedulingEnabled(true);
-      playerBuilder.setTrackSelector(trackSelector);
+              .experimentalSetDynamicSchedulingEnabled(true)
+              .setTrackSelector(trackSelector)
+              // TODO: b/489733731 - Reenable stuck player detection.
+              .setStuckBufferingDetectionTimeoutMs(Integer.MAX_VALUE)
+              .setStuckPlayingDetectionTimeoutMs(Integer.MAX_VALUE)
+              .setStuckPlayingNotEndingTimeoutMs(Integer.MAX_VALUE)
+              .setStuckSuppressedDetectionTimeoutMs(Integer.MAX_VALUE)
+              .enablePerStreamMediaProgression(perStreamMediaProgressionEnabled);
       player = playerBuilder.build();
       this.renderersFactory = renderersFactory;
-      this.hardwareBufferFrameReader = hardwareBufferFrameReader;
+      this.hardwareBufferFrameReaderSupplier = hardwareBufferFrameReaderSupplier;
+      this.shouldReleaseHardwareBufferFrameReader = shouldReleaseHardwareBufferFrameReader;
     }
 
     private void release() {
       player.release();
-      if (hardwareBufferFrameReader != null) {
-        hardwareBufferFrameReader.release();
+      HardwareBufferFrameReader reader = hardwareBufferFrameReaderSupplier.get();
+      // TODO: b/518679527 - Move hardwareBufferFrameReader release to video renderers.
+      if (shouldReleaseHardwareBufferFrameReader && reader != null) {
+        reader.release();
       }
     }
   }
 
   private static final class GapHandlingDecoderFactory implements ImageDecoder.Factory {
     private static final String BLANK_FRAMES_MEDIA_SOURCE_TYPE = "composition_player_blank_frames";
-    private static final int BLANK_IMAGE_BITMAP_WIDTH = 1;
-    private static final int BLANK_IMAGE_BITMAP_HEIGHT = 1;
+    // TODO: b/502556636 - Extract blank image constants to a shared location.
+    private static final int BLANK_IMAGE_BITMAP_WIDTH = 16;
+    private static final int BLANK_IMAGE_BITMAP_HEIGHT = 16;
 
     private final ImageDecoder.Factory imageDecoderFactory;
     private @MonotonicNonNull Format format;
@@ -2233,12 +2436,15 @@ public final class CompositionPlayer extends SimpleBasePlayer {
           && format.sampleMimeType != null
           && format.sampleMimeType.equals(BLANK_FRAMES_MEDIA_SOURCE_TYPE)) {
         return new ExternallyLoadedImageDecoder.Factory(
-                request ->
-                    immediateFuture(
-                        Bitmap.createBitmap(
-                            BLANK_IMAGE_BITMAP_WIDTH,
-                            BLANK_IMAGE_BITMAP_HEIGHT,
-                            Bitmap.Config.ARGB_8888)))
+                request -> {
+                  Bitmap bitmap =
+                      Bitmap.createBitmap(
+                          BLANK_IMAGE_BITMAP_WIDTH,
+                          BLANK_IMAGE_BITMAP_HEIGHT,
+                          Bitmap.Config.ARGB_8888);
+                  bitmap.eraseColor(Color.BLACK);
+                  return immediateFuture(bitmap);
+                })
             .createImageDecoder();
       }
       return imageDecoderFactory.createImageDecoder();
@@ -2252,7 +2458,9 @@ public final class CompositionPlayer extends SimpleBasePlayer {
           CompositionPlayerInternal.Listener,
           SurfaceHolder.Callback,
           PlaybackVideoGraphWrapper.Listener,
-          SurfaceHolderHardwareBufferFrameQueue.Listener {
+          CompositionVideoPacketReleaseControl.Listener,
+          SurfaceHolderFrameWriter.Listener,
+          FrameProcessor.Listener {
 
     // AudioFocusManager.PlayerControl methods. Called on the application thread.
 
@@ -2325,23 +2533,42 @@ public final class CompositionPlayer extends SimpleBasePlayer {
       // TODO: b/328219481 - Report video size change to app.
     }
 
-    // SurfaceHolderHardwareBufferFrameQueue.Listener methods. Called on the effects thread.
+    // CompositionVideoPacketReleaseControl.Listener methods. Called on the playback thread.
+
+    @Override
+    public void onFrameProcessed() {
+      applicationHandler.post(
+          () -> {
+            if (waitingForFrameAfterSeek) {
+              waitingForFrameAfterSeek = false;
+              if (pendingSeekPositionMs != C.TIME_UNSET) {
+                long pendingSeekPosition = pendingSeekPositionMs;
+                pendingSeekPositionMs = C.TIME_UNSET;
+                handleSeekInternal(pendingSeekPosition);
+              }
+            }
+          });
+    }
+
+    @Override
+    public void onError(Exception e) {
+      onError(VideoFrameProcessingException.from(e));
+    }
+
+    // SurfaceHolderFrameWriter.Listener methods. Called on the application thread.
 
     @Override
     public void onFrameAboutToBeRendered(
         long presentationTimeUs, long releaseTimeNs, Format format) {
-      if (packetConsumer != null) {
+      if (frameProcessor != null) {
         VideoSize videoSizeToBeRendered = new VideoSize(format.width, format.height);
-        applicationHandler.post(
-            () -> {
-              if (!Objects.equals(videoSize, videoSizeToBeRendered)) {
-                if (videoSize == null) {
-                  renderedFirstFrame = true;
-                }
-                videoSize = videoSizeToBeRendered;
-                invalidateState();
-              }
-            });
+        if (!Objects.equals(videoSize, videoSizeToBeRendered)) {
+          if (videoSize == null) {
+            renderedFirstFrame = true;
+          }
+          videoSize = videoSizeToBeRendered;
+          invalidateState();
+        }
         if (videoFrameMetadataListener != null) {
           videoFrameMetadataListener.onVideoFrameAboutToBeRendered(
               presentationTimeUs, releaseTimeNs, format, /* mediaFormat= */ null);
@@ -2351,14 +2578,11 @@ public final class CompositionPlayer extends SimpleBasePlayer {
 
     @Override
     public void onEnded() {
-      if (packetConsumer != null) {
-        applicationHandler.post(
-            () -> {
-              // TODO: b/484336225 - reset packetConsumerEnded on replay.
-              packetConsumerEnded = true;
-              updatePlaybackState();
-              invalidateState();
-            });
+      if (frameProcessor != null) {
+        // TODO: b/484336225 - reset packetConsumerEnded on replay.
+        packetConsumerEnded = true;
+        updatePlaybackState();
+        invalidateState();
       }
     }
 
@@ -2372,6 +2596,61 @@ public final class CompositionPlayer extends SimpleBasePlayer {
                   "Error processing video frames",
                   videoFrameProcessingException,
                   PlaybackException.ERROR_CODE_VIDEO_FRAME_PROCESSING_FAILED));
+    }
+
+    // FrameProcessor.Listener methods
+
+    @Override
+    public void onWakeup() {
+      // TODO: b/517459813 - Wake up the renderers.
+    }
+
+    @Override
+    public void onFrameProcessed(Frame frame, @Nullable SyncFenceWrapper onCompleteFence) {
+      if (SDK_INT >= 26 && videoPacketReleaseControl != null) {
+        videoPacketReleaseControl.onFrameProcessed(frame, onCompleteFence);
+      }
+    }
+  }
+
+  // TODO: b/510766403 - Remove once PacketConsumer entrypoint is removed.
+  /** Converts a {@link RenderingPacketConsumer} to a {@link FrameProcessor}. */
+  @Nullable
+  private static FrameProcessor.Factory getRenderingPacketConsumerFactory(
+      @Nullable
+          RenderingPacketConsumer<ImmutableList<HardwareBufferFrame>, HardwareBufferFrameQueue>
+              packetProcessor) {
+    if (SDK_INT >= 26 && packetProcessor != null) {
+      return (output, listenerExecutor, listener) -> {
+        HardwareBufferFrameQueue adaptedQueue =
+            new FrameWriterToHardwareBufferFrameQueueAdapter(output);
+        packetProcessor.setRenderOutput(adaptedQueue);
+        return new PacketConsumerToFrameProcessorAdapter(
+            packetProcessor, listenerExecutor, listener);
+      };
+    }
+    return null;
+  }
+
+  private static final class HandlerExecutor implements Executor {
+    private final HandlerWrapper handler;
+    private final InternalListener internalListener;
+
+    private HandlerExecutor(HandlerWrapper handler, InternalListener internalListener) {
+      this.handler = handler;
+      this.internalListener = internalListener;
+    }
+
+    @Override
+    public void execute(Runnable command) {
+      handler.post(
+          () -> {
+            try {
+              command.run();
+            } catch (RuntimeException e) {
+              internalListener.onError(e);
+            }
+          });
     }
   }
 }

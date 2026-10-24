@@ -71,6 +71,7 @@ import android.text.TextUtils;
 import android.view.KeyEvent;
 import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
+import androidx.collection.ArrayMap;
 import androidx.core.util.ObjectsCompat;
 import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.C;
@@ -116,7 +117,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.checkerframework.checker.initialization.qual.Initialized;
 
-// Getting the commands from MediaControllerCompat'
+// Getting the commands from MediaControllerCompat
 /* package */ class MediaSessionLegacyStub extends MediaSessionCompat.Callback {
 
   private static final String TAG = "MediaSessionLegacyStub";
@@ -130,6 +131,9 @@ import org.checkerframework.checker.initialization.qual.Initialized;
   private static final int DEFAULT_CONNECTION_TIMEOUT_MS = 300_000; // 5 min.
 
   private final ConnectedControllersManager<RemoteUserInfo> connectedControllersManager;
+  private final ArrayMap<RemoteUserInfo, ListenableFuture<MediaSession.ConnectionResult>>
+      connectingControllers;
+  private final ArrayMap<RemoteUserInfo, List<SessionTask>> pendingTasks;
 
   private final MediaSessionImpl sessionImpl;
   private final MediaSessionManager sessionManager;
@@ -164,12 +168,14 @@ import org.checkerframework.checker.initialization.qual.Initialized;
       Uri sessionUri,
       Handler handler,
       Bundle tokenExtras,
+      @Nullable PendingIntent sessionActivity,
       boolean playIfSuppressed,
       ImmutableList<CommandButton> customLayout,
       ImmutableList<CommandButton> mediaButtonPreferences,
       SessionCommands availableSessionCommands,
       Player.Commands availablePlayerCommands,
-      Bundle legacyExtras) {
+      Bundle legacyExtras,
+      @Nullable String packageNameOverride) {
     this.sessionImpl = session;
     this.playIfSuppressed = playIfSuppressed;
     this.customLayout = customLayout;
@@ -177,6 +183,8 @@ import org.checkerframework.checker.initialization.qual.Initialized;
     this.availableSessionCommands = availableSessionCommands;
     this.availablePlayerCommands = availablePlayerCommands;
     this.legacyExtras = new Bundle(legacyExtras);
+    this.connectingControllers = new ArrayMap<>();
+    this.pendingTasks = new ArrayMap<>();
     Context context = sessionImpl.getContext();
     sessionManager = MediaSessionManager.getSessionManager(context);
     controllerLegacyCbForBroadcast = new ControllerLegacyCbForBroadcast();
@@ -251,12 +259,12 @@ import org.checkerframework.checker.initialization.qual.Initialized;
             sessionCompatId,
             SDK_INT < 31 ? receiverComponentName : null,
             SDK_INT < 31 ? mediaButtonIntent : null,
-            /* sessionInfo= */ tokenExtras);
+            /* sessionInfo= */ tokenExtras,
+            packageNameOverride);
     if (SDK_INT >= 31 && broadcastReceiverComponentName != null) {
       Api31.setMediaButtonBroadcastReceiver(sessionCompat, broadcastReceiverComponentName);
     }
 
-    @Nullable PendingIntent sessionActivity = session.getSessionActivity();
     if (sessionActivity != null) {
       sessionCompat.setSessionActivity(sessionActivity);
     }
@@ -308,7 +316,7 @@ import org.checkerframework.checker.initialization.qual.Initialized;
    */
   public MediaSession.ConnectionResult getPlatformConnectionResult(MediaSession mediaSession) {
     MediaSession.ConnectionResult.AcceptedResultBuilder result =
-        new MediaSession.ConnectionResult.AcceptedResultBuilder(mediaSession)
+        new MediaSession.ConnectionResult.AcceptedResultBuilder()
             .setAvailableSessionCommands(availableSessionCommands)
             .setAvailablePlayerCommands(availablePlayerCommands);
     if (!mediaButtonPreferences.isEmpty()) {
@@ -362,7 +370,7 @@ import org.checkerframework.checker.initialization.qual.Initialized;
   }
 
   /**
-   * Sets the legacy error that will be used when the next {@link PlaybackStateCompat} legacy
+   * Sets the legacy error that will be used when the next {@linkplain PlaybackStateCompat legacy
    * playback state is created}.
    *
    * <p>This sets the legacy {@link PlaybackStateCompat} to {@link PlaybackStateCompat#STATE_ERROR}
@@ -465,6 +473,7 @@ import org.checkerframework.checker.initialization.qual.Initialized;
     }
     // No check for COMMAND_RELEASE needed as MediaControllers can always be released.
     sessionCompat.release();
+    connectedControllersManager.release();
   }
 
   public MediaSessionCompat getSessionCompat() {
@@ -846,65 +855,50 @@ import org.checkerframework.checker.initialization.qual.Initialized;
       Log.d(TAG, "RemoteUserInfo is null, ignoring command=" + command);
       return;
     }
-    postOrRun(
-        sessionImpl.getApplicationHandler(),
-        () -> {
-          if (sessionImpl.isReleased()) {
-            return;
-          }
-          if (!sessionCompat.isActive()) {
-            Log.w(
-                TAG,
-                "Ignore incoming player command before initialization. command="
-                    + command
-                    + ", pid="
-                    + remoteUserInfo.getPid());
-            return;
-          }
-          @Nullable ControllerInfo controller = tryGetController(remoteUserInfo);
-          if (controller == null) {
-            // Failed to get controller since connection was rejected.
-            return;
-          }
-          if (!connectedControllersManager.isPlayerCommandAvailable(controller, command)) {
-            if (command == COMMAND_PLAY_PAUSE
-                && !sessionImpl.getPlayerWrapper().getPlayWhenReady()) {
-              Log.w(
-                  TAG,
-                  "Calling play() omitted due to COMMAND_PLAY_PAUSE not being available. If this"
-                      + " play command has started the service for instance for playback"
-                      + " resumption, this may prevent the service from being started into the"
-                      + " foreground.");
-            }
-            return;
-          }
-          int resultCode = sessionImpl.onPlayerCommandRequestOnHandler(controller, command);
-          if (resultCode != RESULT_SUCCESS) {
-            // Don't run rejected command.
-            return;
-          }
-
-          sessionImpl
-              .callWithControllerForCurrentRequestSet(
-                  controller,
-                  () -> {
-                    try {
-                      task.run(controller);
-                    } catch (RemoteException e) {
-                      // Currently it's TransactionTooLargeException or DeadSystemException.
-                      // We'd better to leave log for those cases because
-                      //   - TransactionTooLargeException means that we may need to fix our code.
-                      //     (e.g. add pagination or special way to deliver Bitmap)
-                      //   - DeadSystemException means that errors around it can be ignored.
-                      Log.w(TAG, "Exception in " + controller, e);
+    postOrRunOnApplicationHandler(
+        () ->
+            handleControllerTaskOnHandler(
+                remoteUserInfo,
+                controller -> {
+                  if (!connectedControllersManager.isPlayerCommandAvailable(controller, command)) {
+                    if (command == COMMAND_PLAY_PAUSE
+                        && !sessionImpl.getPlayerWrapper().getPlayWhenReady()) {
+                      Log.w(
+                          TAG,
+                          "Calling play() omitted due to COMMAND_PLAY_PAUSE not being available."
+                              + " If this play command has started the service for instance for"
+                              + " playback resumption, this may prevent the service from being"
+                              + " started into the foreground.");
                     }
-                  })
-              .run();
-          if (callOnPlayerInteractionFinished) {
-            sessionImpl.onPlayerInteractionFinishedOnHandler(
-                controller, new Player.Commands.Builder().add(command).build());
-          }
-        });
+                    return;
+                  }
+                  int resultCode = sessionImpl.onPlayerCommandRequestOnHandler(controller, command);
+                  if (resultCode != RESULT_SUCCESS) {
+                    // Don't run rejected command.
+                    return;
+                  }
+
+                  sessionImpl
+                      .callWithControllerForCurrentRequestSet(
+                          controller,
+                          () -> {
+                            try {
+                              task.run(controller);
+                            } catch (RemoteException e) {
+                              // That's TransactionTooLargeException or DeadSystemException.
+                              // We'd better to leave log for those cases because
+                              //   - TransactionTooLargeException means that we may need to fix our
+                              //     code (e.g. add pagination or special way to deliver Bitmap).
+                              //   - DeadSystemException means that errors around it can be ignored.
+                              Log.w(TAG, "Exception in " + controller, e);
+                            }
+                          })
+                      .run();
+                  if (callOnPlayerInteractionFinished) {
+                    sessionImpl.onPlayerInteractionFinishedOnHandler(
+                        controller, new Player.Commands.Builder().add(command).build());
+                  }
+                }));
   }
 
   private void dispatchSessionTaskWithSetRatingSessionCommand(Rating rating) {
@@ -942,47 +936,33 @@ import org.checkerframework.checker.initialization.qual.Initialized;
               + (sessionCommand == null ? commandCode : sessionCommand));
       return;
     }
-    postOrRun(
-        sessionImpl.getApplicationHandler(),
-        () -> {
-          if (sessionImpl.isReleased()) {
-            return;
-          }
-          if (!sessionCompat.isActive()) {
-            Log.w(
-                TAG,
-                "Ignore incoming session command before initialization. command="
-                    + (sessionCommand == null ? commandCode : sessionCommand.customAction)
-                    + ", pid="
-                    + remoteUserInfo.getPid());
-            return;
-          }
-          @Nullable ControllerInfo controller = tryGetController(remoteUserInfo);
-          if (controller == null) {
-            // Failed to get controller since connection was rejected.
-            return;
-          }
-          if (sessionCommand != null) {
-            if (!connectedControllersManager.isSessionCommandAvailable(
-                controller, sessionCommand)) {
-              return;
-            }
-          } else {
-            if (!connectedControllersManager.isSessionCommandAvailable(controller, commandCode)) {
-              return;
-            }
-          }
-          try {
-            task.run(controller);
-          } catch (RemoteException e) {
-            // Currently it's TransactionTooLargeException or DeadSystemException.
-            // We'd better to leave log for those cases because
-            //   - TransactionTooLargeException means that we may need to fix our code.
-            //     (e.g. add pagination or special way to deliver Bitmap)
-            //   - DeadSystemException means that errors around it can be ignored.
-            Log.w(TAG, "Exception in " + controller, e);
-          }
-        });
+    postOrRunOnApplicationHandler(
+        () ->
+            handleControllerTaskOnHandler(
+                remoteUserInfo,
+                controller -> {
+                  if (sessionCommand != null) {
+                    if (!connectedControllersManager.isSessionCommandAvailable(
+                        controller, sessionCommand)) {
+                      return;
+                    }
+                  } else {
+                    if (!connectedControllersManager.isSessionCommandAvailable(
+                        controller, commandCode)) {
+                      return;
+                    }
+                  }
+                  try {
+                    task.run(controller);
+                  } catch (RemoteException e) {
+                    // That's TransactionTooLargeException or DeadSystemException.
+                    // We'd better to leave log for those cases because
+                    //   - TransactionTooLargeException means that we may need to fix our code (e.g.
+                    //     add pagination or special way to deliver Bitmap).
+                    //   - DeadSystemException means that errors around it can be ignored.
+                    Log.w(TAG, "Exception in " + controller, e);
+                  }
+                }));
   }
 
   private void dispatchCustomCommandAsPredefinedCommand(SessionCommand command) {
@@ -1020,38 +1000,94 @@ import org.checkerframework.checker.initialization.qual.Initialized;
     }
   }
 
-  @Nullable
-  private ControllerInfo tryGetController(RemoteUserInfo remoteUserInfo) {
-    @Nullable ControllerInfo controller = connectedControllersManager.getController(remoteUserInfo);
-    if (controller == null) {
-      // Try connect.
-      ControllerCb controllerCb = new ControllerLegacyCb(remoteUserInfo);
-      controller =
-          new ControllerInfo(
-              remoteUserInfo,
-              ControllerInfo.LEGACY_CONTROLLER_VERSION,
-              ControllerInfo.LEGACY_CONTROLLER_INTERFACE_VERSION,
-              sessionManager.isTrustedForMediaControl(remoteUserInfo),
-              controllerCb,
-              /* connectionHints= */ Bundle.EMPTY,
-              /* maxCommandsForMediaItems= */ 0,
-              /* isPackageNameVerified= */ SDK_INT >= 33);
-      MediaSession.ConnectionResult connectionResult = sessionImpl.onConnectOnHandler(controller);
-      if (!connectionResult.isAccepted) {
-        controllerCb.onDisconnected(/* seq= */ 0);
-        return null;
-      }
-      connectedControllersManager.addController(
-          controller.getRemoteUserInfo(),
-          controller,
-          connectionResult.availableSessionCommands,
-          connectionResult.availablePlayerCommands);
-      sessionImpl.onPostConnectOnHandler(controller);
+  private void handleControllerTaskOnHandler(RemoteUserInfo remoteUserInfo, SessionTask task) {
+    if (sessionImpl.isReleased()) {
+      return;
     }
-    // Reset disconnect timeout.
-    connectionTimeoutHandler.disconnectControllerAfterTimeout(controller, connectionTimeoutMs);
+    if (!sessionCompat.isActive()) {
+      Log.w(TAG, "Ignore incoming command before initialization. pid=" + remoteUserInfo.getPid());
+      return;
+    }
+    @Nullable ControllerInfo controller = connectedControllersManager.getController(remoteUserInfo);
+    if (controller != null) {
+      // Reset disconnect timeout.
+      connectionTimeoutHandler.disconnectControllerAfterTimeout(controller, connectionTimeoutMs);
+      try {
+        task.run(controller);
+      } catch (RemoteException e) {
+        Log.w(TAG, "Exception in " + controller, e);
+      }
+      return;
+    }
 
-    return controller;
+    if (connectingControllers.containsKey(remoteUserInfo)) {
+      checkNotNull(pendingTasks.get(remoteUserInfo)).add(task);
+      return;
+    }
+
+    // Try connect.
+    ControllerCb controllerCb = new ControllerLegacyCb(remoteUserInfo);
+    ControllerInfo newController =
+        new ControllerInfo(
+            remoteUserInfo,
+            ControllerInfo.LEGACY_CONTROLLER_VERSION,
+            ControllerInfo.LEGACY_CONTROLLER_INTERFACE_VERSION,
+            sessionManager.isTrustedForMediaControl(remoteUserInfo),
+            controllerCb,
+            /* connectionHints= */ Bundle.EMPTY,
+            /* maxCommandsForMediaItems= */ 0,
+            /* isPackageNameVerified= */ SDK_INT >= 33);
+
+    ListenableFuture<MediaSession.ConnectionResult> connectionResultFuture =
+        sessionImpl.onConnectOnHandler(newController);
+    ignoreFuture(connectingControllers.put(remoteUserInfo, connectionResultFuture));
+    List<SessionTask> tasks = new ArrayList<>();
+    tasks.add(task);
+    pendingTasks.put(remoteUserInfo, tasks);
+
+    Futures.addCallback(
+        connectionResultFuture,
+        new FutureCallback<MediaSession.ConnectionResult>() {
+          @Override
+          public void onSuccess(MediaSession.ConnectionResult connectionResult) {
+            ignoreFuture(connectingControllers.remove(remoteUserInfo));
+            List<SessionTask> tasks = pendingTasks.remove(remoteUserInfo);
+            if (sessionImpl.isReleased()
+                || connectionResult == null
+                || !connectionResult.isAccepted) {
+              controllerCb.onDisconnected(/* seq= */ 0);
+              return;
+            }
+            connectedControllersManager.addController(
+                newController.getRemoteUserInfo(),
+                newController,
+                connectionResult.availableSessionCommands,
+                connectionResult.availablePlayerCommands);
+            sessionImpl.onPostConnectOnHandler(newController);
+
+            // Reset disconnect timeout.
+            connectionTimeoutHandler.disconnectControllerAfterTimeout(
+                newController, connectionTimeoutMs);
+
+            if (tasks != null) {
+              for (SessionTask task : tasks) {
+                try {
+                  task.run(newController);
+                } catch (RemoteException e) {
+                  Log.w(TAG, "Exception in " + newController, e);
+                }
+              }
+            }
+          }
+
+          @Override
+          public void onFailure(Throwable t) {
+            ignoreFuture(connectingControllers.remove(remoteUserInfo));
+            pendingTasks.remove(remoteUserInfo);
+            controllerCb.onDisconnected(/* seq= */ 0);
+          }
+        },
+        this::postOrRunOnApplicationHandler);
   }
 
   public void setLegacyControllerDisconnectTimeoutMs(long timeoutMs) {
@@ -1059,14 +1095,12 @@ import org.checkerframework.checker.initialization.qual.Initialized;
   }
 
   public void updateLegacySessionPlaybackState(PlayerWrapper playerWrapper) {
-    postOrRun(
-        sessionImpl.getApplicationHandler(),
+    postOrRunOnApplicationHandler(
         () -> sessionCompat.setPlaybackState(createPlaybackStateCompat(playerWrapper)));
   }
 
   public void updateLegacySessionPlaybackStateAndQueue(PlayerWrapper playerWrapper) {
-    postOrRun(
-        sessionImpl.getApplicationHandler(),
+    postOrRunOnApplicationHandler(
         () -> {
           sessionCompat.setPlaybackState(createPlaybackStateCompat(playerWrapper));
           controllerLegacyCbForBroadcast.updateQueue(
@@ -1092,9 +1126,8 @@ import org.checkerframework.checker.initialization.qual.Initialized;
               new FutureCallback<MediaItemsWithStartPosition>() {
                 @Override
                 public void onSuccess(MediaItemsWithStartPosition mediaItemsWithStartPosition) {
-                  postOrRun(
-                      sessionImpl.getApplicationHandler(),
-                      sessionImpl.callWithControllerForCurrentRequestSet(
+                  sessionImpl
+                      .callWithControllerForCurrentRequestSet(
                           controller,
                           () -> {
                             PlayerWrapper player = sessionImpl.getPlayerWrapper();
@@ -1117,7 +1150,8 @@ import org.checkerframework.checker.initialization.qual.Initialized;
                                     .addAll(COMMAND_SET_MEDIA_ITEM, COMMAND_PREPARE)
                                     .addIf(COMMAND_PLAY_PAUSE, play)
                                     .build());
-                          }));
+                          })
+                      .run();
                 }
 
                 @Override
@@ -1125,7 +1159,7 @@ import org.checkerframework.checker.initialization.qual.Initialized;
                   // Do nothing, the session is free to ignore these requests.
                 }
               },
-              MoreExecutors.directExecutor());
+              this::postOrRunOnApplicationHandler);
         },
         sessionCompat.getCurrentControllerInfo(),
         /* callOnPlayerInteractionFinished= */ false);
@@ -1151,9 +1185,8 @@ import org.checkerframework.checker.initialization.qual.Initialized;
               new FutureCallback<List<MediaItem>>() {
                 @Override
                 public void onSuccess(List<MediaItem> mediaItems) {
-                  postOrRun(
-                      sessionImpl.getApplicationHandler(),
-                      sessionImpl.callWithControllerForCurrentRequestSet(
+                  sessionImpl
+                      .callWithControllerForCurrentRequestSet(
                           controller,
                           () -> {
                             if (index == C.INDEX_UNSET) {
@@ -1166,7 +1199,8 @@ import org.checkerframework.checker.initialization.qual.Initialized;
                                 new Player.Commands.Builder()
                                     .add(COMMAND_CHANGE_MEDIA_ITEMS)
                                     .build());
-                          }));
+                          })
+                      .run();
                 }
 
                 @Override
@@ -1174,7 +1208,7 @@ import org.checkerframework.checker.initialization.qual.Initialized;
                   // Do nothing, the session is free to ignore these requests.
                 }
               },
-              MoreExecutors.directExecutor());
+              this::postOrRunOnApplicationHandler);
         },
         sessionCompat.getCurrentControllerInfo(),
         /* callOnPlayerInteractionFinished= */ false);
@@ -1199,7 +1233,7 @@ import org.checkerframework.checker.initialization.qual.Initialized;
         MoreExecutors.directExecutor());
   }
 
-  private static <T> void ignoreFuture(Future<T> unused) {
+  private static <T> void ignoreFuture(@Nullable Future<T> unused) {
     // no-op
   }
 
@@ -1232,8 +1266,7 @@ import org.checkerframework.checker.initialization.qual.Initialized;
   }
 
   private void onAndroidAutoConnectionStateChanged() {
-    postOrRun(
-        sessionImpl.getApplicationHandler(),
+    postOrRunOnApplicationHandler(
         this::updateCustomLayoutAndLegacyExtrasForMediaButtonPreferencesAndInformExtrasChanged);
   }
 
@@ -1310,6 +1343,10 @@ import org.checkerframework.checker.initialization.qual.Initialized;
                 .setExtras(extras)
                 .build())
         .build();
+  }
+
+  private void postOrRunOnApplicationHandler(Runnable runnable) {
+    postOrRun(sessionImpl.getApplicationHandler(), runnable);
   }
 
   /* @FunctionalInterface */
@@ -2187,7 +2224,7 @@ import org.checkerframework.checker.initialization.qual.Initialized;
       if (!Objects.equals(intent.getAction(), Intent.ACTION_MEDIA_BUTTON)) {
         return;
       }
-      KeyEvent keyEvent = intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT);
+      KeyEvent keyEvent = DefaultActionFactory.getKeyEvent(intent);
       if (keyEvent == null) {
         return;
       }

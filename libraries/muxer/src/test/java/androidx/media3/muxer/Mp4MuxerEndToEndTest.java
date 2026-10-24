@@ -26,6 +26,7 @@ import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.assertThrows;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
 import android.util.Pair;
 import androidx.media3.common.C;
@@ -52,6 +53,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
+import org.robolectric.annotation.Config;
 
 /** End to end tests for {@link Mp4Muxer}. */
 @RunWith(AndroidJUnit4.class)
@@ -62,6 +64,8 @@ public class Mp4MuxerEndToEndTest {
 
   private static final String H265_HDR10_MP4 = "hdr10-720p.mp4";
   private static final String AV1_MP4 = "sample_av1.mp4";
+  private static final String VP9_MP4 = "bbb_800x640_768kbps_30fps_vp9.mp4";
+  private static final String IT35_MP4 = "sample_with_it35_track.mp4";
   private final Context context = ApplicationProvider.getApplicationContext();
 
   @Test
@@ -142,6 +146,58 @@ public class Mp4MuxerEndToEndTest {
             new Mp4Extractor(new DefaultSubtitleParserFactory()), checkNotNull(outputFilePath));
     DumpFileAsserts.assertOutput(
         context, fakeExtractorOutput, MuxerTestUtil.getExpectedMp4DumpFilePath(AV1_MP4));
+  }
+
+  @Test
+  // TODO: b/507292304 - Suppressed due to failure on SDK 23.
+  @Config(minSdk = 24)
+  public void createVp9Mp4File_withoutCsd_matchesExpected() throws Exception {
+    String outputFilePath = temporaryFolder.newFile().getPath();
+
+    try (Mp4Muxer mp4Muxer = new Mp4Muxer.Builder(SeekableMuxerOutput.of(outputFilePath)).build()) {
+      mp4Muxer.addMetadataEntry(
+          new Mp4TimestampData(
+              /* creationTimestampSeconds= */ 100_000_000L,
+              /* modificationTimestampSeconds= */ 500_000_000L));
+      feedInputDataToMuxer(
+          context,
+          mp4Muxer,
+          MP4_FILE_ASSET_DIRECTORY + VP9_MP4,
+          /* removeInitializationData= */ true,
+          /* removeAudioSampleFlags= */ false);
+    }
+
+    FakeExtractorOutput fakeExtractorOutput =
+        TestUtil.extractAllSamplesFromFilePath(
+            new Mp4Extractor(new DefaultSubtitleParserFactory()), checkNotNull(outputFilePath));
+    DumpFileAsserts.assertOutput(
+        context,
+        fakeExtractorOutput,
+        MuxerTestUtil.getExpectedMp4DumpFilePath(VP9_MP4 + "_without_csd"));
+  }
+
+  @Test
+  public void createMp4File_withIt35_matchesExpected() throws Exception {
+    String outputFilePath = temporaryFolder.newFile().getPath();
+
+    try (Mp4Muxer mp4Muxer = new Mp4Muxer.Builder(SeekableMuxerOutput.of(outputFilePath)).build()) {
+      mp4Muxer.addMetadataEntry(
+          new Mp4TimestampData(
+              /* creationTimestampSeconds= */ 100_000_000L,
+              /* modificationTimestampSeconds= */ 500_000_000L));
+      feedInputDataToMuxer(context, mp4Muxer, MP4_FILE_ASSET_DIRECTORY + IT35_MP4);
+      mp4Muxer.addTrackReference(
+          /* trackId= */ 1,
+          Mp4Muxer.TRACK_REFERENCE_TYPE_CDSC,
+          /* referencedTrackIds= */ ImmutableList.of(0));
+    }
+
+    FakeExtractorOutput fakeExtractorOutput =
+        TestUtil.extractAllSamplesFromFilePath(
+            new Mp4Extractor(new DefaultSubtitleParserFactory()), checkNotNull(outputFilePath));
+
+    DumpFileAsserts.assertOutput(
+        context, fakeExtractorOutput, MuxerTestUtil.getExpectedMp4DumpFilePath(IT35_MP4));
   }
 
   @Test
@@ -880,7 +936,35 @@ public class Mp4MuxerEndToEndTest {
 
   @Test
   public void
-      writeMp4File_withSomeFreeSpaceAfterFileTypeBoxAndAttemptStreamableOutputDisabled_reservesExpectedFreeSpace()
+      writeMp4File_withSomeFreeSpaceAfterFileTypeBox_reservesExpectedFreeSpaceAndWritesMoovBoxAfterIt()
+          throws Exception {
+    String outputFilePath = temporaryFolder.newFile().getPath();
+    Pair<ByteBuffer, BufferInfo> sampleAndSampleInfo =
+        getFakeSampleAndSampleInfo(/* presentationTimeUs= */ 0L, /* isVideo= */ true);
+
+    try (Mp4Muxer muxer =
+        new Mp4Muxer.Builder(SeekableMuxerOutput.of(outputFilePath))
+            .experimentalSetFreeSpaceAfterFileTypeBox(500_000)
+            .build()) {
+      muxer.addMetadataEntry(
+          new Mp4TimestampData(
+              /* creationTimestampSeconds= */ 1_000_000L,
+              /* modificationTimestampSeconds= */ 5_000_000L));
+      int trackId = muxer.addTrack(FAKE_VIDEO_FORMAT);
+      muxer.writeSampleData(trackId, sampleAndSampleInfo.first, sampleAndSampleInfo.second);
+    }
+
+    DumpableMp4Box dumpableBox =
+        new DumpableMp4Box(ByteBuffer.wrap(TestUtil.getByteArrayFromFilePath(outputFilePath)));
+    DumpFileAsserts.assertOutput(
+        context,
+        dumpableBox,
+        MuxerTestUtil.getExpectedMp4DumpFilePath("mp4_with_some_free_space_after_ftyp.mp4"));
+  }
+
+  @Test
+  public void
+      writeMp4File_withSomeFreeSpaceAfterFileTypeBoxAndAttemptStreamableOutputDisabled_reservesExpectedFreeSpaceAndNoMoovBoxAfterIt()
           throws Exception {
     String outputFilePath = temporaryFolder.newFile().getPath();
     Pair<ByteBuffer, BufferInfo> sampleAndSampleInfo =
@@ -904,7 +988,8 @@ public class Mp4MuxerEndToEndTest {
     DumpFileAsserts.assertOutput(
         context,
         dumpableBox,
-        MuxerTestUtil.getExpectedMp4DumpFilePath("mp4_with_some_free_space_after_ftyp.mp4"));
+        MuxerTestUtil.getExpectedMp4DumpFilePath(
+            "mp4_with_some_free_space_after_ftyp_and_streamable_output_disabled.mp4"));
   }
 
   @Test
@@ -924,6 +1009,77 @@ public class Mp4MuxerEndToEndTest {
 
     assertThat(audioSampleInfo.first.remaining()).isEqualTo(0);
     assertThat(videoSampleInfo.first.remaining()).isEqualTo(0);
+  }
+
+  @Test
+  public void writeMp4File_withSomeMetadataTrack_writesAsTextMetadataTrack() throws Exception {
+    String outputFilePath = temporaryFolder.newFile().getPath();
+    // Fake metadata payload
+    byte[] sampleData = new byte[] {0x05, 0x06, 0x07, 0x08};
+    Format metadataTrackFormat =
+        new Format.Builder().setSampleMimeType(MimeTypes.APPLICATION_META).build();
+
+    try (Mp4Muxer muxer = new Mp4Muxer.Builder(SeekableMuxerOutput.of(outputFilePath)).build()) {
+      muxer.addMetadataEntry(
+          new Mp4TimestampData(
+              /* creationTimestampSeconds= */ 1_000_000L,
+              /* modificationTimestampSeconds= */ 5_000_000L));
+      // Add the metadata track.
+      int trackId = muxer.addTrack(metadataTrackFormat);
+      // Write fake metadata track samples.
+      for (int i = 0; i < 5; i++) {
+        muxer.writeSampleData(
+            trackId,
+            ByteBuffer.wrap(sampleData),
+            new BufferInfo(
+                /* presentationTimeUs= */ i * 100_000L,
+                /* size= */ sampleData.length,
+                /* flags= */ 0));
+      }
+    }
+
+    FakeExtractorOutput fakeExtractorOutput =
+        TestUtil.extractAllSamplesFromFilePath(
+            new Mp4Extractor(new DefaultSubtitleParserFactory()), checkNotNull(outputFilePath));
+    DumpFileAsserts.assertOutput(
+        context,
+        fakeExtractorOutput,
+        MuxerTestUtil.getExpectedMp4DumpFilePath("mp4_with_metadata_track.mp4"));
+  }
+
+  @Test
+  public void writeMp4File_withSomeUnknownTrack_writesAsTextMetadataTrack() throws Exception {
+    String outputFilePath = temporaryFolder.newFile().getPath();
+    // Fake metadata payload
+    byte[] sampleData = new byte[] {0x05, 0x06, 0x07, 0x08};
+    Format metadataTrackFormat = new Format.Builder().setSampleMimeType("xyz").build();
+
+    try (Mp4Muxer muxer = new Mp4Muxer.Builder(SeekableMuxerOutput.of(outputFilePath)).build()) {
+      muxer.addMetadataEntry(
+          new Mp4TimestampData(
+              /* creationTimestampSeconds= */ 1_000_000L,
+              /* modificationTimestampSeconds= */ 5_000_000L));
+      // Add the metadata track.
+      int trackId = muxer.addTrack(metadataTrackFormat);
+      // Write fake metadata samples.
+      for (int i = 0; i < 5; i++) {
+        muxer.writeSampleData(
+            trackId,
+            ByteBuffer.wrap(sampleData),
+            new BufferInfo(
+                /* presentationTimeUs= */ i * 100_000L,
+                /* size= */ sampleData.length,
+                /* flags= */ 0));
+      }
+    }
+
+    FakeExtractorOutput fakeExtractorOutput =
+        TestUtil.extractAllSamplesFromFilePath(
+            new Mp4Extractor(new DefaultSubtitleParserFactory()), checkNotNull(outputFilePath));
+    DumpFileAsserts.assertOutput(
+        context,
+        fakeExtractorOutput,
+        MuxerTestUtil.getExpectedMp4DumpFilePath("mp4_with_unknown_track.mp4"));
   }
 
   @Test
@@ -963,7 +1119,6 @@ public class Mp4MuxerEndToEndTest {
     FakeExtractorOutput fakeExtractorOutput =
         TestUtil.extractAllSamplesFromFilePath(
             new Mp4Extractor(new DefaultSubtitleParserFactory()), checkNotNull(outputFilePath));
-    // Dump file should have T.35 metadata track once extractor starts extracting.
     DumpFileAsserts.assertOutput(
         context,
         fakeExtractorOutput,
@@ -1008,6 +1163,59 @@ public class Mp4MuxerEndToEndTest {
         new DumpableMp4Box(ByteBuffer.wrap(TestUtil.getByteArrayFromFilePath(outputFilePath)));
     DumpFileAsserts.assertOutput(
         context, dumpableBox, MuxerTestUtil.getExpectedDumpFilePath("mp4_with_t35_metadata.box"));
+  }
+
+  @Test
+  public void writeMp4File_withT35MetadataTrackReferencingVideoTrack_matchesExpectedBoxStructure()
+      throws Exception {
+    String outputFilePath = temporaryFolder.newFile().getPath();
+    // ITU-T T.35 prefix: country code, provider code, etc.
+    byte[] t35Prefix = new byte[] {0x00, 0x01, 0x02, 0x03, 0x04};
+    Format t35Format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.APPLICATION_ITUT_T35)
+            .setInitializationData(ImmutableList.of(t35Prefix))
+            .build();
+
+    try (Mp4Muxer muxer = new Mp4Muxer.Builder(SeekableMuxerOutput.of(outputFilePath)).build()) {
+      muxer.addMetadataEntry(
+          new Mp4TimestampData(
+              /* creationTimestampSeconds= */ 1_000_000L,
+              /* modificationTimestampSeconds= */ 5_000_000L));
+      int videoTrackId = muxer.addTrack(FAKE_VIDEO_FORMAT);
+      writeFakeSamples(muxer, videoTrackId, /* sampleCount= */ 5);
+      int audioTrackId = muxer.addTrack(FAKE_AUDIO_FORMAT);
+      writeFakeSamples(muxer, audioTrackId, /* sampleCount= */ 5);
+      int t35TrackId = muxer.addTrack(t35Format);
+      writeFakeSamples(muxer, t35TrackId, /* sampleCount= */ 5);
+      muxer.addTrackReference(
+          t35TrackId, Mp4Muxer.TRACK_REFERENCE_TYPE_CDSC, ImmutableList.of(videoTrackId));
+    }
+
+    DumpableMp4Box dumpableBox =
+        new DumpableMp4Box(ByteBuffer.wrap(TestUtil.getByteArrayFromFilePath(outputFilePath)));
+    // Last `trak` box (corresponding to T35 metadata track) contains `tref` box.
+    DumpFileAsserts.assertOutput(
+        context,
+        dumpableBox,
+        MuxerTestUtil.getExpectedDumpFilePath(
+            "mp4_with_t35_metadata_track_referencing_video_track.box"));
+  }
+
+  @Test
+  @SuppressLint("WrongConstant") // Intentionally assigned wrong constant.
+  public void addTrackReference_withUnsupportedTrackReferenceType_throws() throws Exception {
+    String outputFilePath = temporaryFolder.newFile().getPath();
+
+    try (Mp4Muxer muxer = new Mp4Muxer.Builder(SeekableMuxerOutput.of(outputFilePath)).build()) {
+      int firstTrackId = muxer.addTrack(FAKE_VIDEO_FORMAT);
+      int secondTrackId = muxer.addTrack(FAKE_VIDEO_FORMAT);
+      assertThrows(
+          IllegalArgumentException.class,
+          () ->
+              muxer.addTrackReference(
+                  firstTrackId, /* referenceType= */ 1234, ImmutableList.of(secondTrackId)));
+    }
   }
 
   private static void writeFakeSamples(Mp4Muxer muxer, int trackId, int sampleCount)

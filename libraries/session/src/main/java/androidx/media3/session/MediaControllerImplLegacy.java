@@ -15,6 +15,7 @@
  */
 package androidx.media3.session;
 
+import static androidx.media3.common.util.Util.ignoreFuture;
 import static androidx.media3.session.MediaUtils.calculateBufferedPercentage;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
@@ -82,10 +83,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.checkerframework.checker.initialization.qual.UnderInitialization;
 
+@SuppressWarnings("nullness") // TODO: b/78934030 - Add missing nullness checks to this class.
 /* package */ class MediaControllerImplLegacy implements MediaController.MediaControllerImpl {
 
   private static final String TAG = "MCImplLegacy";
@@ -320,7 +321,7 @@ import org.checkerframework.checker.initialization.qual.UnderInitialization;
     if (mediaItemIndex != currentMediaItemIndex) {
       QueueTimeline queueTimeline = (QueueTimeline) controllerInfo.playerInfo.timeline;
       long queueId = queueTimeline.getQueueId(mediaItemIndex);
-      if (queueId != QueueItem.UNKNOWN_ID) {
+      if (queueId != QueueItem.UNKNOWN_ID && queueId != QueueTimeline.FAKE_QUEUE_ID) {
         controllerCompat.getTransportControls().skipToQueueItem(queueId);
         newMediaItemIndex = mediaItemIndex;
         mediaItemTransitionReason = Player.MEDIA_ITEM_TRANSITION_REASON_SEEK;
@@ -1844,10 +1845,6 @@ import org.checkerframework.checker.initialization.qual.UnderInitialization;
               listener -> listener.onError(getInstance(), newControllerInfo.sessionError));
     }
     listeners.flushEvents();
-  }
-
-  private static <T> void ignoreFuture(Future<T> unused) {
-    // Ignore return value of the future because legacy session cannot get result back.
   }
 
   private class ConnectionCallback extends MediaBrowserCompat.ConnectionCallback {

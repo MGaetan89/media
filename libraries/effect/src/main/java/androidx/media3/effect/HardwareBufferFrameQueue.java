@@ -38,6 +38,7 @@ public interface HardwareBufferFrameQueue {
     public static final class Builder {
       private int width;
       private int height;
+      private int rotationDegrees;
       private int pixelFormat;
       private long usageFlags;
       private ColorInfo colorInfo;
@@ -45,9 +46,9 @@ public interface HardwareBufferFrameQueue {
       /**
        * Creates a new builder with default values.
        *
-       * <p>Width and height default to 0, {@code pixelFormat} defaults to {@link
-       * HardwareBuffer#RGBA_8888}, {@code usageFlags} defaults to {@link
-       * HardwareBuffer#USAGE_GPU_SAMPLED_IMAGE}, and {@link ColorInfo} defaults to {@link
+       * <p>Width and height default to 0, {@code rotationDegrees} defaults to 0, {@code
+       * pixelFormat} defaults to {@link HardwareBuffer#RGBA_8888}, {@code usageFlags} defaults to
+       * {@link HardwareBuffer#USAGE_GPU_SAMPLED_IMAGE}, and {@link ColorInfo} defaults to {@link
        * ColorInfo#SDR_BT709_LIMITED}.
        */
       public Builder() {
@@ -77,6 +78,18 @@ public interface HardwareBufferFrameQueue {
       @CanIgnoreReturnValue
       public Builder setHeight(int height) {
         this.height = height;
+        return this;
+      }
+
+      /**
+       * Sets the rotation degrees of the buffer.
+       *
+       * @param rotationDegrees The rotation degrees.
+       * @return This builder.
+       */
+      @CanIgnoreReturnValue
+      public Builder setRotationDegrees(int rotationDegrees) {
+        this.rotationDegrees = rotationDegrees;
         return this;
       }
 
@@ -118,23 +131,41 @@ public interface HardwareBufferFrameQueue {
 
       /** Builds the {@link FrameFormat} instance. */
       public FrameFormat build() {
-        return new FrameFormat(width, height, pixelFormat, usageFlags, colorInfo);
+        return new FrameFormat(width, height, rotationDegrees, pixelFormat, usageFlags, colorInfo);
       }
     }
 
     public final int width;
     public final int height;
+    public final int rotationDegrees;
     public final int pixelFormat;
     public final long usageFlags;
     public final ColorInfo colorInfo;
 
     private FrameFormat(
-        int width, int height, int pixelFormat, long usageFlags, ColorInfo colorInfo) {
+        int width,
+        int height,
+        int rotationDegrees,
+        int pixelFormat,
+        long usageFlags,
+        ColorInfo colorInfo) {
       this.width = width;
       this.height = height;
+      this.rotationDegrees = rotationDegrees;
       this.pixelFormat = pixelFormat;
       this.usageFlags = usageFlags;
       this.colorInfo = colorInfo;
+    }
+
+    /** Returns a {@link Builder} initialized with the values of this instance. */
+    public Builder buildUpon() {
+      return new Builder()
+          .setWidth(width)
+          .setHeight(height)
+          .setRotationDegrees(rotationDegrees)
+          .setColorInfo(colorInfo)
+          .setPixelFormat(pixelFormat)
+          .setUsageFlags(usageFlags);
     }
 
     @Override
@@ -148,6 +179,7 @@ public interface HardwareBufferFrameQueue {
       FrameFormat that = (FrameFormat) o;
       return width == that.width
           && height == that.height
+          && rotationDegrees == that.rotationDegrees
           && pixelFormat == that.pixelFormat
           && usageFlags == that.usageFlags
           && Objects.equals(colorInfo, that.colorInfo);
@@ -155,7 +187,7 @@ public interface HardwareBufferFrameQueue {
 
     @Override
     public int hashCode() {
-      return Objects.hash(width, height, pixelFormat, usageFlags, colorInfo);
+      return Objects.hash(width, height, rotationDegrees, pixelFormat, usageFlags, colorInfo);
     }
 
     @Override
@@ -165,6 +197,8 @@ public interface HardwareBufferFrameQueue {
           + width
           + ", height="
           + height
+          + ", rotationDegrees="
+          + rotationDegrees
           + ", pixelFormat="
           + pixelFormat
           + ", usageFlags="
@@ -185,6 +219,9 @@ public interface HardwareBufferFrameQueue {
    * <p>If this method is called multiple times without returning a frame, only the most recent
    * {@code wakeupListener} is guaranteed to be invoked.
    *
+   * <p>If a dequeued {@link HardwareBufferFrame} cannot be filled and {@linkplain #queue queued}
+   * back for any reason, it must be {@linkplain HardwareBufferFrame#release released}.
+   *
    * @param format The required format for the dequeued buffer.
    * @param wakeupListener A callback to notify the caller when a buffer becomes available.
    * @return A {@link HardwareBufferFrame}, or {@code null} if the queue is currently full.
@@ -194,8 +231,6 @@ public interface HardwareBufferFrameQueue {
 
   /**
    * Queues a {@link HardwareBufferFrame} for consumption by the downstream component.
-   *
-   * <p>Implementations may override {@link Frame#release(SyncFenceCompat)} of the queued frame.
    *
    * <p>The implementation is responsible for ensuring the buffer is correctly reused or released
    * once the downstream component has finished processing it.

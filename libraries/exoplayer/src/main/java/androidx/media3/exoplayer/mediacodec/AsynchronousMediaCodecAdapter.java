@@ -34,6 +34,7 @@ import androidx.annotation.RequiresApi;
 import androidx.annotation.VisibleForTesting;
 import androidx.media3.common.C;
 import androidx.media3.common.util.ExperimentalApi;
+import androidx.media3.common.util.ThrowingRunnable;
 import androidx.media3.common.util.TraceUtil;
 import androidx.media3.decoder.CryptoInfo;
 import com.google.common.base.Supplier;
@@ -91,14 +92,10 @@ import java.util.List;
     }
 
     /**
-     * Sets whether to enable {@link MediaCodec#CONFIGURE_FLAG_USE_CRYPTO_ASYNC} on API 34 and
-     * above.
-     *
-     * <p>This method is experimental. Its default value may change, or it may be renamed or removed
-     * in a future release.
+     * Sets whether to enable {@link MediaCodec#CONFIGURE_FLAG_USE_CRYPTO_ASYNC} on API 36 and
+     * above. The default is {@code true}.
      */
-    @ExperimentalApi // TODO: b/470368123 - Remove method once flag usage once safe.
-    public void experimentalSetAsyncCryptoFlagEnabled(boolean enableAsyncCryptoFlag) {
+    public void setAsyncCryptoFlagEnabled(boolean enableAsyncCryptoFlag) {
       enableSynchronousBufferQueueingWithAsyncCryptoFlag = enableAsyncCryptoFlag;
     }
 
@@ -270,11 +267,11 @@ import java.util.List;
   }
 
   @Override
-  public void useInputBuffer(Runnable runnable) {
-    asynchronousMediaCodecCallback.useInputBuffer(
+  public <E extends Exception> void useBuffer(ThrowingRunnable<E> runnable) throws E {
+    asynchronousMediaCodecCallback.useBuffer(
         () -> {
           bufferEnqueuer.maybeThrowException();
-          asynchronousMediaCodecCallback.useInputBuffer(runnable);
+          runnable.run();
         });
   }
 

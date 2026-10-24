@@ -82,7 +82,8 @@ import java.util.concurrent.Future;
       BitmapLoader bitmapLoader,
       boolean playIfSuppressed,
       boolean isPeriodicPositionUpdateEnabled,
-      @MediaLibrarySession.LibraryErrorReplicationMode int libraryErrorReplicationMode) {
+      @MediaLibrarySession.LibraryErrorReplicationMode int libraryErrorReplicationMode,
+      @Nullable String packageNameOverride) {
     super(
         instance,
         context,
@@ -98,7 +99,8 @@ import java.util.concurrent.Future;
         bitmapLoader,
         playIfSuppressed,
         isPeriodicPositionUpdateEnabled,
-        /* useLegacySurfaceHandling= */ false);
+        /* useLegacySurfaceHandling= */ false,
+        packageNameOverride);
     this.instance = instance;
     this.callback = callback;
     this.libraryErrorReplicationMode = libraryErrorReplicationMode;
@@ -131,7 +133,10 @@ import java.util.concurrent.Future;
   }
 
   public void clearReplicatedLibraryError() {
-    getMediaSessionLegacyStub().clearLegacyErrorStatus();
+    postOrRunOnApplicationHandler(
+        () -> {
+          getMediaSessionLegacyStub().clearLegacyErrorStatus();
+        });
   }
 
   public ListenableFuture<LibraryResult<MediaItem>> onGetLibraryRootOnHandler(
@@ -265,23 +270,34 @@ import java.util.concurrent.Future;
 
   public void notifyChildrenChanged(
       String parentId, int itemCount, @Nullable LibraryParams params) {
-    List<ControllerInfo> connectedControllers = instance.getConnectedControllers();
-    for (int i = 0; i < connectedControllers.size(); i++) {
-      notifyChildrenChanged(connectedControllers.get(i), parentId, itemCount, params);
-    }
+    postOrRunOnApplicationHandler(
+        () -> {
+          List<ControllerInfo> connectedControllers = instance.getConnectedControllers();
+          for (int i = 0; i < connectedControllers.size(); i++) {
+            notifyChildrenChangedOnHandler(
+                connectedControllers.get(i), parentId, itemCount, params);
+          }
+        });
   }
 
   public void notifyChildrenChanged(
       ControllerInfo browser, String parentId, int itemCount, @Nullable LibraryParams params) {
-    if (isMediaNotificationControllerConnected() && isMediaNotificationController(browser)) {
+    postOrRunOnApplicationHandler(
+        () -> notifyChildrenChangedOnHandler(browser, parentId, itemCount, params));
+  }
+
+  private void notifyChildrenChangedOnHandler(
+      ControllerInfo browser, String parentId, int itemCount, @Nullable LibraryParams params) {
+    ControllerInfo actualBrowser = browser;
+    if (isMediaNotificationControllerConnected() && isMediaNotificationController(actualBrowser)) {
       ControllerInfo systemUiBrowser = getSystemUiControllerInfo();
       if (systemUiBrowser == null) {
         return;
       }
-      browser = systemUiBrowser;
+      actualBrowser = systemUiBrowser;
     }
     dispatchRemoteControllerTaskWithoutReturn(
-        browser,
+        actualBrowser,
         (callback, seq) -> {
           if (!isSubscribed(callback, parentId)) {
             return;
@@ -328,15 +344,21 @@ import java.util.concurrent.Future;
 
   public void notifySearchResultChanged(
       ControllerInfo browser, String query, int itemCount, @Nullable LibraryParams params) {
-    if (isMediaNotificationControllerConnected() && isMediaNotificationController(browser)) {
-      ControllerInfo systemUiBrowser = getSystemUiControllerInfo();
-      if (systemUiBrowser == null) {
-        return;
-      }
-      browser = systemUiBrowser;
-    }
-    dispatchRemoteControllerTaskWithoutReturn(
-        browser, (callback, seq) -> callback.onSearchResultChanged(seq, query, itemCount, params));
+    postOrRunOnApplicationHandler(
+        () -> {
+          ControllerInfo actualBrowser = browser;
+          if (isMediaNotificationControllerConnected()
+              && isMediaNotificationController(actualBrowser)) {
+            ControllerInfo systemUiBrowser = getSystemUiControllerInfo();
+            if (systemUiBrowser == null) {
+              return;
+            }
+            actualBrowser = systemUiBrowser;
+          }
+          dispatchRemoteControllerTaskWithoutReturn(
+              actualBrowser,
+              (callback, seq) -> callback.onSearchResultChanged(seq, query, itemCount, params));
+        });
   }
 
   @Override

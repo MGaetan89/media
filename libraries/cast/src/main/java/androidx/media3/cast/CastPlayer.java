@@ -61,9 +61,7 @@ public final class CastPlayer extends ForwardingPlayer {
    */
   public interface TransferCallback {
 
-    TransferCallback DEFAULT =
-        (sourcePlayer, targetPlayer) ->
-            PlayerTransferState.fromPlayer(sourcePlayer).setToPlayer(targetPlayer);
+    TransferCallback DEFAULT = new DefaultCastPlayerTransferCallback();
 
     /**
      * Called immediately before changing the active {@link Player}, with the intended use of
@@ -276,7 +274,7 @@ public final class CastPlayer extends ForwardingPlayer {
     this(
         new RemoteCastPlayer(
             context,
-            Cast.getSingletonInstance().sideloadCastContext(castContext),
+            Cast.getSingletonInstance(castContext),
             mediaItemConverter,
             /* trackSelector= */ null,
             seekBackIncrementMs,

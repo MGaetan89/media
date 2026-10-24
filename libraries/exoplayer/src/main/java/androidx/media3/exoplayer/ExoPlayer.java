@@ -303,7 +303,8 @@ public interface ExoPlayer extends Player {
     /* package */ String playerName;
     /* package */ boolean dynamicSchedulingEnabled;
     /* package */ SuitableOutputChecker suitableOutputChecker;
-    /* package */ boolean avoidLoadingWhileEnded;
+    /* package */ boolean enforceAdPlaybackOnTimelineRefresh;
+    /* package */ boolean perStreamMediaProgressionEnabled;
 
     /**
      * Creates a builder.
@@ -360,7 +361,7 @@ public interface ExoPlayer extends Player {
      *   <li>{@code usePlatformDiagnostics}: {@code true}
      *   <li>{@link Clock}: {@link Clock#DEFAULT}
      *   <li>{@code playbackLooper}: {@code null} (create new thread)
-     *   <li>{@code dynamicSchedulingEnabled}: {@code false}
+     *   <li>{@code dynamicSchedulingEnabled}: {@code true}
      * </ul>
      *
      * @param context A {@link Context}.
@@ -534,7 +535,8 @@ public interface ExoPlayer extends Player {
       playerName = "";
       priority = C.PRIORITY_PLAYBACK;
       suitableOutputChecker = new DefaultSuitableOutputChecker();
-      avoidLoadingWhileEnded = true;
+      dynamicSchedulingEnabled = true;
+      enforceAdPlaybackOnTimelineRefresh = true;
     }
 
     /**
@@ -564,25 +566,39 @@ public interface ExoPlayer extends Player {
      * <p>If a custom {@link AudioSink} is used then it must correctly implement {@link
      * AudioSink#getAudioTrackBufferSizeUs()} to enable dynamic scheduling for audio playback.
      *
+     * <p>Enabled by default (value is {@code true}).
+     *
      * <p>This method is experimental, and will be renamed or removed in a future release.
      *
      * @param dynamicSchedulingEnabled Whether to enable dynamic scheduling.
      */
     @CanIgnoreReturnValue
-    @ExperimentalApi // TODO: b/369523131 - Remove once feature is enabled by default.
+    @ExperimentalApi // TODO: b/500985770 - Remove this method.
     public Builder experimentalSetDynamicSchedulingEnabled(boolean dynamicSchedulingEnabled) {
       checkState(!buildCalled);
       this.dynamicSchedulingEnabled = dynamicSchedulingEnabled;
       return this;
     }
 
-    /** Enables a bug fix to avoid loading while ended. */
+    /**
+     * Sets whether ExoPlayer can advance its media processing on a per-stream basis.
+     *
+     * <p>The default is {@code false}.
+     *
+     * <p>If {@code false} then ExoPlayer will not start processing the next item in the playlist
+     * until it has finished with the current item. If {@code true} then ExoPlayer may enable
+     * renderers on subsequent playlist items as each finishes processing media. Enabling this
+     * feature can reduce startup latency between media items.
+     *
+     * <p>This method is experimental, and will be renamed or removed in a future release.
+     *
+     * @param perStreamMediaProgressionEnabled Whether to enable media progression per stream.
+     */
     @CanIgnoreReturnValue
-    @ExperimentalApi
-    public Builder experimentalAvoidLoadingWhileEnded(boolean avoidLoadingWhileEnded) {
-      // TODO: b/469982169 - Remove this method after 1.10 release
+    @ExperimentalApi // TODO: b/510217604 - Remove this method.
+    public Builder enablePerStreamMediaProgression(boolean perStreamMediaProgressionEnabled) {
       checkState(!buildCalled);
-      this.avoidLoadingWhileEnded = avoidLoadingWhileEnded;
+      this.perStreamMediaProgressionEnabled = perStreamMediaProgressionEnabled;
       return this;
     }
 
@@ -682,12 +698,14 @@ public interface ExoPlayer extends Player {
      * @param bandwidthMeter A {@link BandwidthMeter}.
      * @return This builder.
      * @throws IllegalStateException If {@link #build()} has already been called.
+     * @throws IllegalArgumentException If {@code bandwidthMeter} is {@link BandwidthMeter#NO_OP}.
      */
     @CanIgnoreReturnValue
     @UnstableApi
     public Builder setBandwidthMeter(BandwidthMeter bandwidthMeter) {
       checkState(!buildCalled);
       checkNotNull(bandwidthMeter);
+      checkArgument(bandwidthMeter != BandwidthMeter.NO_OP);
       this.bandwidthMeterSupplier = () -> bandwidthMeter;
       return this;
     }
@@ -1156,6 +1174,28 @@ public interface ExoPlayer extends Player {
     public Builder setPauseAtEndOfMediaItems(boolean pauseAtEndOfMediaItems) {
       checkState(!buildCalled);
       this.pauseAtEndOfMediaItems = pauseAtEndOfMediaItems;
+      return this;
+    }
+
+    /**
+     * Sets whether to enforce ad playback when the timeline is refreshed by a source update.
+     *
+     * <p>If {@code true}, then an ad group resolved at or before the current playback position
+     * during a timeline refresh will be played. If {@code false}, then the resolved ad group will
+     * not play.
+     *
+     * <p>The default is {@code true}.
+     *
+     * @param enforceAdPlaybackOnTimelineRefresh Whether to enforce ad playback on timeline refresh.
+     * @return This builder.
+     * @throws IllegalStateException If {@link #build()} has already been called.
+     */
+    @CanIgnoreReturnValue
+    @UnstableApi
+    public Builder setEnforceAdPlaybackOnTimelineRefresh(
+        boolean enforceAdPlaybackOnTimelineRefresh) {
+      checkState(!buildCalled);
+      this.enforceAdPlaybackOnTimelineRefresh = enforceAdPlaybackOnTimelineRefresh;
       return this;
     }
 
@@ -1639,7 +1679,7 @@ public interface ExoPlayer extends Player {
   /**
    * Sets the ID of the audio session to attach to the underlying {@link android.media.AudioTrack}.
    *
-   * <p>The audio session ID can be generated using {@link Util#generateAudioSessionIdV21(Context)}.
+   * <p>The audio session ID can be generated using {@link Util#generateAudioSessionId(Context)}.
    *
    * @param audioSessionId The audio session ID, or {@link C#AUDIO_SESSION_ID_UNSET} if it should be
    *     generated by the framework.
@@ -1934,6 +1974,19 @@ public interface ExoPlayer extends Player {
    */
   @UnstableApi
   void setPauseAtEndOfMediaItems(boolean pauseAtEndOfMediaItems);
+
+  /**
+   * Sets whether to enforce ad playback on timeline refresh.
+   *
+   * <p>If {@code true}, then an ad group resolved at or before the current playback position during
+   * a timeline refresh will be played. If {@code false}, then the resolved ad group will not play.
+   *
+   * <p>The default is {@code true}.
+   *
+   * @param enforceAdPlaybackOnTimelineRefresh Whether to enforce ad playback on timeline refresh.
+   */
+  @UnstableApi
+  void setEnforceAdPlaybackOnTimelineRefresh(boolean enforceAdPlaybackOnTimelineRefresh);
 
   /**
    * Returns whether the player pauses playback at the end of each media item.

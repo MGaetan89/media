@@ -87,8 +87,25 @@
       app:layout_constraintStart_toStartOf="parent"
       app:layout_constraintTop_toTopOf="parent"
       app:layout_constraintBottom_toBottomOf="parent">
-      <TableRow
-        android:layout_weight="1">
+      <TableRow android:layout_weight="1">
+        <TextView
+            android:layout_gravity="center_vertical"
+            android:text="@string/enable_audio_track" />
+        <CheckBox
+            android:id="@+id/enable_audio_track_checkbox"
+            android:layout_gravity="end"
+            android:checked="true" />
+      </TableRow>
+      <TableRow android:layout_weight="1">
+        <TextView
+            android:layout_gravity="center_vertical"
+            android:text="@string/enable_video_track" />
+        <CheckBox
+            android:id="@+id/enable_video_track_checkbox"
+            android:layout_gravity="end"
+            android:checked="true" />
+      </TableRow>
+      <TableRow android:layout_weight="1">
         <TextView
           android:layout_gravity="center_vertical"
           android:text="@string/remove_audio" />
@@ -254,6 +271,15 @@
             android:text="@string/enable_trim_optimization" />
         <CheckBox
             android:id="@+id/enable_trim_optimization"
+            android:layout_gravity="end"/>
+      </TableRow>
+      <TableRow
+          android:layout_weight="1">
+        <TextView
+            android:layout_gravity="center_vertical"
+            android:text="@string/enable_packet_processor" />
+        <CheckBox
+            android:id="@+id/enable_packet_processor"
             android:layout_gravity="end"/>
       </TableRow>
       <TableRow

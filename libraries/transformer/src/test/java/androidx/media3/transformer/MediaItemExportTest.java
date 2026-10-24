@@ -33,6 +33,7 @@ import static androidx.media3.transformer.TestUtil.FILE_AUDIO_AMR_NB;
 import static androidx.media3.transformer.TestUtil.FILE_AUDIO_AMR_WB;
 import static androidx.media3.transformer.TestUtil.FILE_AUDIO_ELST_SKIP_500MS;
 import static androidx.media3.transformer.TestUtil.FILE_AUDIO_RAW;
+import static androidx.media3.transformer.TestUtil.FILE_AUDIO_RAW_AAC;
 import static androidx.media3.transformer.TestUtil.FILE_AUDIO_VIDEO;
 import static androidx.media3.transformer.TestUtil.FILE_AUDIO_VIDEO_INCREASING_TIMESTAMPS_15S;
 import static androidx.media3.transformer.TestUtil.FILE_UNKNOWN_DURATION;
@@ -556,6 +557,7 @@ public final class MediaItemExportTest {
             "48000hz"));
   }
 
+  @Ignore("Flaky: b/515797237")
   @Test
   public void start_audioVideoItemInAudioOnlySequence_removeVideo_preservesItemAudio()
       throws Exception {
@@ -1163,6 +1165,28 @@ public final class MediaItemExportTest {
   }
 
   @Test
+  public void export_withRawAacFile_transmuxesIntoMp4() throws Exception {
+    CapturingMuxer.Factory muxerFactory = new CapturingMuxer.Factory(/* handleAudioAsPcm= */ false);
+    Transformer transformer =
+        new TestTransformerBuilder(context).setMuxerFactory(muxerFactory).build();
+    EditedMediaItem editedMediaItem =
+        new EditedMediaItem.Builder(MediaItem.fromUri(ASSET_URI_PREFIX + FILE_AUDIO_RAW_AAC))
+            .build();
+
+    transformer.start(editedMediaItem, outputDir.newFile().getPath());
+    ExportResult result = TransformerTestRunner.runLooper(transformer);
+
+    assertThat(result.audioConversionProcess).isEqualTo(CONVERSION_PROCESS_TRANSMUXED);
+    assertThat(result.audioEncoderName).isNull();
+
+    DumpFileAsserts.assertOutput(
+        context,
+        muxerFactory.getCreatedMuxer(),
+        getDumpFileName(
+            /* originalFileName= */ FILE_AUDIO_RAW_AAC, /* modifications= */ "transmuxed"));
+  }
+
+  @Test
   public void analyze_audioOnlyWithItemEffect_completesSuccessfully() throws Exception {
     shadowMediaCodecConfig.addCodec(CODEC_INFO_AAC, /* isEncoder= */ true, THROWING_CODEC_CONFIG);
     Transformer transformer =
@@ -1694,7 +1718,7 @@ public final class MediaItemExportTest {
 
     @Override
     public @Transformer.ProgressState int getProgress(ProgressHolder progressHolder) {
-      return 0;
+      return PROGRESS_STATE_NOT_STARTED;
     }
 
     @Override

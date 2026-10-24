@@ -16,11 +16,15 @@
 package androidx.media3.cast
 
 import android.content.Context
+import android.view.ContextThemeWrapper
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.performClick
+import androidx.media3.cast.test.R as TestR
 import androidx.mediarouter.media.MediaRouteSelector
+import androidx.mediarouter.testing.MediaRouterTestHelper
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.google.android.gms.cast.framework.CastContext
@@ -30,24 +34,36 @@ import com.google.common.truth.Truth.assertThat
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
+import org.junit.rules.TestWatcher
+import org.junit.runner.Description
 import org.junit.runner.RunWith
 import org.mockito.Mock
 import org.mockito.Mockito.`when` as whenever
 import org.mockito.junit.MockitoJUnit
 import org.mockito.junit.MockitoRule
+import org.robolectric.shadows.ShadowDialog
 
 /** Unit test for [MediaRouteButton]. */
 @RunWith(AndroidJUnit4::class)
 class MediaRouteButtonTest {
 
   @get:Rule val mocks: MockitoRule = MockitoJUnit.rule()
-  @get:Rule val composeTestRule = createComposeRule()
+  val composeTestRule = createComposeRule()
+  private val mediaRouterResetRule =
+    object : TestWatcher() {
+      override fun finished(description: Description?) {
+        MediaRouterTestHelper.resetMediaRouter()
+      }
+    }
+  // Ensures the active composition is disposed of and its MediaRouter callbacks are removed before
+  // MediaRouterTestHelper resets the static state between tests.
+  @get:Rule val ruleChain = RuleChain.outerRule(mediaRouterResetRule).around(composeTestRule)
 
   @Mock private lateinit var mockCastContext: CastContext
   @Mock private lateinit var mockSessionManager: SessionManager
@@ -66,7 +82,7 @@ class MediaRouteButtonTest {
     whenever(mockCastContextInitializer.init()).thenReturn(castContextTaskCompletionSource.task)
     whenever(mockCastContext.sessionManager).thenReturn(mockSessionManager)
     whenever(mockCastContext.mergedSelector).thenReturn(selector)
-    cast = Cast.getSingletonInstance()
+    cast = Cast.getSingletonInstance(context)
   }
 
   @After
@@ -76,7 +92,7 @@ class MediaRouteButtonTest {
 
   @Test
   fun initializeMediaRouteButton_buttonIsDisplayed() {
-    cast.sideloadCastContext(mockCastContext)
+    cast = Cast.getSingletonInstance(mockCastContext)
     val buttonContentDescription = context.getString(R.string.media_route_button_disconnected)
 
     composeTestRule.setContent { MediaRouteButton() }
@@ -88,22 +104,22 @@ class MediaRouteButtonTest {
   fun initializeMediaRouteButton_notInitialized_notThrowsException() = runTest {
     cast.initialize(mockCastContextInitializer)
     val isContentComposed = AtomicBoolean(false)
-    val content: @Composable MediaRouteButtonState.() -> Unit = { isContentComposed.set(true) }
+    val content: @Composable MediaRouterState.() -> Unit = { isContentComposed.set(true) }
 
     composeTestRule.setContent { MediaRouteButtonContainer(content) }
-    advanceUntilIdle()
+    composeTestRule.waitForIdle()
 
     assertThat(isContentComposed.get()).isFalse()
   }
 
   @Test
   fun initializeMediaRouteButton_alreadyInitialized_contentIsComposed() = runTest {
-    cast.sideloadCastContext(mockCastContext)
+    cast = Cast.getSingletonInstance(mockCastContext)
     val isContentComposed = AtomicBoolean(false)
-    val content: @Composable MediaRouteButtonState.() -> Unit = { isContentComposed.set(true) }
+    val content: @Composable MediaRouterState.() -> Unit = { isContentComposed.set(true) }
 
     composeTestRule.setContent { MediaRouteButtonContainer(content) }
-    advanceUntilIdle()
+    composeTestRule.waitForIdle()
 
     assertThat(isContentComposed.get()).isTrue()
   }
@@ -113,10 +129,10 @@ class MediaRouteButtonTest {
     cast.initialize(mockCastContextInitializer)
     castContextTaskCompletionSource.setResult(mockCastContext)
     val isContentComposed = AtomicBoolean(false)
-    val content: @Composable MediaRouteButtonState.() -> Unit = { isContentComposed.set(true) }
+    val content: @Composable MediaRouterState.() -> Unit = { isContentComposed.set(true) }
 
     composeTestRule.setContent { MediaRouteButtonContainer(content) }
-    advanceUntilIdle()
+    composeTestRule.waitForIdle()
 
     assertThat(isContentComposed.get()).isTrue()
   }
@@ -127,10 +143,10 @@ class MediaRouteButtonTest {
     val exception = RuntimeException("Failed to load")
     castContextTaskCompletionSource.setException(exception)
     val isContentComposed = AtomicBoolean(false)
-    val content: @Composable MediaRouteButtonState.() -> Unit = { isContentComposed.set(true) }
+    val content: @Composable MediaRouterState.() -> Unit = { isContentComposed.set(true) }
 
     composeTestRule.setContent { MediaRouteButtonContainer(content) }
-    advanceUntilIdle()
+    composeTestRule.waitForIdle()
 
     assertThat(cast.castContextLoadFailure).isEqualTo(exception)
     assertThat(isContentComposed.get()).isFalse()
@@ -138,9 +154,9 @@ class MediaRouteButtonTest {
 
   @Test
   fun initializeMediaRouteButton_onBackgroundThread_throwsException() = runTest {
-    cast.sideloadCastContext(mockCastContext)
+    cast = Cast.getSingletonInstance(mockCastContext)
     val isContentComposed = AtomicBoolean(false)
-    val content: @Composable MediaRouteButtonState.() -> Unit = { isContentComposed.set(true) }
+    val content: @Composable MediaRouterState.() -> Unit = { isContentComposed.set(true) }
     var caughtException: Throwable? = null
 
     val job =
@@ -155,5 +171,103 @@ class MediaRouteButtonTest {
 
     assertThat(caughtException).isNotNull()
     assertThat(isContentComposed.get()).isFalse()
+  }
+
+  @Test
+  fun resolveDialogTheme_withOpaqueAttributes_returnsZero() {
+    val themedContext = ContextThemeWrapper(context, TestR.style.Theme_Test_Opaque)
+
+    val theme = resolveDialogTheme(themedContext)
+
+    assertThat(theme).isEqualTo(0)
+  }
+
+  @Test
+  fun resolveDialogTheme_withTranslucentPrimary_returnsFallbackTheme() {
+    val themedContext = ContextThemeWrapper(context, TestR.style.Theme_Test_TranslucentPrimary)
+
+    val theme = resolveDialogTheme(themedContext)
+
+    assertThat(theme).isEqualTo(R.style.AppThemeDialog)
+  }
+
+  @Test
+  fun resolveDialogTheme_withDefaultAppCompatTheme_returnsZero() {
+    val themedContext = ContextThemeWrapper(context, TestR.style.Theme_Default_AppCompat)
+
+    val theme = resolveDialogTheme(themedContext)
+
+    assertThat(theme).isEqualTo(0)
+  }
+
+  @Test
+  fun resolveDialogTheme_withDefaultMaterial3Theme_returnsZero() {
+    val themedContext = ContextThemeWrapper(context, TestR.style.Theme_Default_material3)
+
+    val theme = resolveDialogTheme(themedContext)
+
+    assertThat(theme).isEqualTo(0)
+  }
+
+  @Test
+  fun resolveDialogTheme_withDefaultMaterialComponentsTheme_returnsZero() {
+    val themedContext = ContextThemeWrapper(context, TestR.style.Theme_Default_material_components)
+
+    val theme = resolveDialogTheme(themedContext)
+
+    assertThat(theme).isEqualTo(0)
+  }
+
+  @Test
+  fun resolveDialogTheme_withNoPrimaryColorAttributes_returnsFallbackTheme() {
+    val themedContext =
+      ContextThemeWrapper(context, TestR.style.Theme_Test_NoPrimaryColorAttributes)
+
+    val theme = resolveDialogTheme(themedContext)
+
+    assertThat(theme).isEqualTo(R.style.AppThemeDialog)
+  }
+
+  @Test
+  fun rememberMediaRouteButtonState_returnsInitialState() {
+    lateinit var state: MediaRouteButtonState
+
+    composeTestRule.setContent { state = rememberMediaRouteButtonState() }
+
+    assertThat(state.isPickerVisible).isFalse()
+  }
+
+  @Test
+  fun mediaRouteButton_click_updatesDialogStateToTrue() {
+    cast = Cast.getSingletonInstance(mockCastContext)
+    val buttonContentDescription = context.getString(R.string.media_route_button_disconnected)
+    val state = MediaRouteButtonState()
+    composeTestRule.setContent { MediaRouteButton(state = state) }
+    assertThat(state.isPickerVisible).isFalse()
+
+    composeTestRule.onNodeWithContentDescription(buttonContentDescription).performClick()
+    composeTestRule.waitForIdle()
+
+    assertThat(state.isPickerVisible).isTrue()
+    val dialog = ShadowDialog.getLatestDialog()
+    dialog?.dismiss()
+    composeTestRule.waitForIdle()
+  }
+
+  @Test
+  fun mediaRouteButton_clickAndDismiss_updatesDialogState() {
+    cast = Cast.getSingletonInstance(mockCastContext)
+    val buttonContentDescription = context.getString(R.string.media_route_button_disconnected)
+    val state = MediaRouteButtonState()
+    composeTestRule.setContent { MediaRouteButton(state = state) }
+
+    composeTestRule.onNodeWithContentDescription(buttonContentDescription).performClick()
+    composeTestRule.waitForIdle()
+    val dialog = ShadowDialog.getLatestDialog()
+    assertThat(dialog).isNotNull()
+    dialog.dismiss()
+    composeTestRule.waitForIdle()
+
+    assertThat(state.isPickerVisible).isFalse()
   }
 }

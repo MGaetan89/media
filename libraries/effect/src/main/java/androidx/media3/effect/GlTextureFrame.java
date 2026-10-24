@@ -25,13 +25,17 @@ import androidx.media3.common.util.Consumer;
 import androidx.media3.common.util.ExperimentalApi;
 import androidx.media3.common.util.GlUtil;
 import androidx.media3.common.util.Log;
+import androidx.media3.common.video.SyncFenceWrapper;
+import com.google.common.collect.ImmutableMap;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
+import java.util.Map;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/** A {@link Frame} implementation that wraps a {@link GlTextureInfo}. */
+/** A frame that wraps a {@link GlTextureInfo}. */
 @ExperimentalApi // TODO: b/449956776 - Remove once FrameConsumer API is finalized.
-public class GlTextureFrame implements Frame {
+public class GlTextureFrame {
+
   public static final GlTextureFrame END_OF_STREAM_FRAME =
       new Builder(
               new GlTextureInfo(
@@ -53,7 +57,7 @@ public class GlTextureFrame implements Frame {
   /** The format of the frame. */
   public final Format format;
 
-  private final Metadata metadata;
+  private final ImmutableMap<String, Object> metadata;
 
   /** The {@link Executor} on which the {@code releaseTextureCallback} is called. */
   public final Executor releaseTextureExecutor;
@@ -71,7 +75,7 @@ public class GlTextureFrame implements Frame {
    * ensure the contents have been fully written to.
    *
    * <p>Callers must *not* {@linkplain GlUtil#deleteSyncObject delete} this fence, as it may be
-   * reused up until this frame is {@linkplain #release(SyncFenceCompat) released}.
+   * reused up until this frame is {@linkplain #release(SyncFenceWrapper) released}.
    *
    * <p>The value is {@link GlUtil#GL_FENCE_SYNC_UNSET} if no fence has been created for this
    * texture, as it is only expected to be produced and consumed within the same GL command stream.
@@ -90,7 +94,7 @@ public class GlTextureFrame implements Frame {
     private long presentationTimeUs;
     private Format format;
     private long releaseTimeNs;
-    private Metadata metadata;
+    private ImmutableMap<String, Object> metadata;
     private long fenceSync;
 
     /**
@@ -108,7 +112,7 @@ public class GlTextureFrame implements Frame {
       this.glTextureInfo = glTextureInfo;
       this.releaseTextureExecutor = releaseTextureExecutor;
       this.releaseTextureCallback = releaseTextureCallback;
-      this.metadata = new Metadata() {};
+      this.metadata = ImmutableMap.of();
       presentationTimeUs = C.TIME_UNSET;
       format = new Format.Builder().build();
       releaseTimeNs = C.TIME_UNSET;
@@ -147,8 +151,8 @@ public class GlTextureFrame implements Frame {
 
     /** Sets the {@link GlTextureFrame#metadata}. */
     @CanIgnoreReturnValue
-    public Builder setMetadata(Metadata metadata) {
-      this.metadata = metadata;
+    public Builder setMetadata(Map<String, Object> metadata) {
+      this.metadata = ImmutableMap.copyOf(metadata);
       return this;
     }
 
@@ -192,19 +196,23 @@ public class GlTextureFrame implements Frame {
     return new Builder(this);
   }
 
-  @Override
-  public Metadata getMetadata() {
+  public ImmutableMap<String, Object> getMetadata() {
     return metadata;
   }
 
   /**
-   * {@inheritDoc}
+   * Releases the frame and its underlying resources.
    *
    * <p>This implementation is idempotent if called after the frame has already been released. It
    * will strictly release the underlying resources only when the count transitions from 1 to 0.
+   *
+   * @param releaseFence A {@link SyncFenceWrapper} that must signal before the underlying resources
+   *     can be fully released, or {@code null} if the resources can be released immediately.
    */
-  @Override
-  public void release(@Nullable SyncFenceCompat releaseFence) {
+  public void release(@Nullable SyncFenceWrapper releaseFence) {
+    if (releaseFence != null) {
+      releaseFence.close();
+    }
     while (true) {
       int currentCount = referenceCount.get();
       if (currentCount == 0) {
